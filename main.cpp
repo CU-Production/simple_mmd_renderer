@@ -36,7 +36,6 @@ struct Vertex {
 // Application state
 struct {
     sg_pipeline pip;
-    sg_bindings bind;
     sg_pass_action pass_action;
     
     std::shared_ptr<mmd::Model> model;
@@ -55,7 +54,7 @@ struct {
     float time = 0.0f;
     bool model_loaded = false;
     bool motion_loaded = false;
-    bool test_mode = true;  // Start with test mode
+    bool test_mode = false;  // Start with test mode
     
     // Camera parameters
     HMM_Vec3 camera_pos = {0.0f, 0.0f, 5.0f};  // Closer to model
@@ -216,7 +215,9 @@ void UpdateModelBuffers() {
     
     // Create vertex buffer
     sg_buffer_desc vbuf_desc = {};
-    vbuf_desc.data = SG_RANGE(vertices);
+    // vbuf_desc.data = SG_RANGE(vertices);
+    vbuf_desc.data.ptr = vertices.data();
+    vbuf_desc.data.size = vertices.size() * sizeof(Vertex);
     vbuf_desc.label = "model-vertices";
     g_state.vertex_buffer = sg_make_buffer(&vbuf_desc);
     
@@ -227,7 +228,9 @@ void UpdateModelBuffers() {
     }
     sg_buffer_desc ibuf_desc = {};
     ibuf_desc.usage.index_buffer = true;
-    ibuf_desc.data = SG_RANGE(indices);
+    // ibuf_desc.data = SG_RANGE(indices);
+    ibuf_desc.data.ptr = indices.data();
+    ibuf_desc.data.size = indices.size() * sizeof(uint32_t);
     ibuf_desc.label = "model-indices";
     g_state.index_buffer = sg_make_buffer(&ibuf_desc);
     
@@ -238,9 +241,7 @@ void UpdateModelBuffers() {
     
     std::cout << "  Index buffer created with " << indices.size() << " indices" << std::endl;
     
-    // Update bindings
-    g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
-    g_state.bind.index_buffer = g_state.index_buffer;
+
     
     std::cout << "Updated model buffers: " << vertices.size() << " vertices, " << indices.size() << " indices" << std::endl;
     std::cout << "  Vertex buffer id: " << g_state.vertex_buffer.id << std::endl;
@@ -452,14 +453,24 @@ void frame(void) {
         
         // Apply pipeline first
         sg_apply_pipeline(g_state.pip);
+        // sg_apply_pipeline(g_state.test_pipeline);
         
         // Ensure bindings are up to date
-        g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
-        g_state.bind.index_buffer = g_state.index_buffer;
-        g_state.bind.index_buffer_offset = 0;
+        // Update bindings
+        sg_bindings _bind = {};
+        _bind.vertex_buffers[0] = g_state.vertex_buffer;
+        _bind.index_buffer = g_state.index_buffer;
+
+        // Verify bindings before applying (same as test square)
+        if (debug_frame) {
+            std::cout << "  Binding check:" << std::endl;
+            std::cout << "    Vertex buffer in bindings: " << _bind.vertex_buffers[0].id << std::endl;
+            std::cout << "    Index buffer in bindings: " << _bind.index_buffer.id << std::endl;
+            std::cout << "    Index buffer offset: " << _bind.index_buffer_offset << std::endl;
+        }
         
         // Apply bindings
-        sg_apply_bindings(&g_state.bind);
+        sg_apply_bindings(&_bind);
         
         // Apply uniforms (after pipeline and bindings)
         // Check uniform data size matches shader expectation (16 bytes * 4 = 64 bytes for mat4)
