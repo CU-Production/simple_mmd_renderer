@@ -21,7 +21,8 @@ include_directories(
 
 # Windows-specific settings
 if(WIN32)
-    add_definitions(-DSOKOL_D3D11)
+#    add_definitions(-DSOKOL_D3D11)
+    add_definitions(-DSOKOL_GLCORE)
 #    add_definitions(-DMMD_WINDOWS)
 endif()
 
@@ -72,10 +73,13 @@ set(SHADER_LANG "glsl430:hlsl5:metal_macos")
 set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/main.glsl)
 set(SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/main.glsl.h)
 
+set(TEST_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/test_triangle.glsl)
+set(TEST_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/test_triangle.glsl.h)
+
 # Create shader output directory
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/shader)
 
-# Add custom command to compile shader
+# Add custom command to compile main shader
 add_custom_command(
     OUTPUT ${SHADER_HEADER}
     COMMAND ${SOKOL_SHDC_COMMAND}
@@ -87,8 +91,20 @@ add_custom_command(
     VERBATIM
 )
 
+# Add custom command to compile test shader
+add_custom_command(
+    OUTPUT ${TEST_SHADER_HEADER}
+    COMMAND ${SOKOL_SHDC_COMMAND}
+        --input ${TEST_SHADER_SRC}
+        --output ${TEST_SHADER_HEADER}
+        --slang ${SHADER_LANG}
+    DEPENDS ${TEST_SHADER_SRC}
+    COMMENT "Compiling shader ${TEST_SHADER_SRC} -> ${TEST_SHADER_HEADER}"
+    VERBATIM
+)
+
 # Create shader header file target
-add_custom_target(shader_header DEPENDS ${SHADER_HEADER})
+add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${TEST_SHADER_HEADER})
 
 # Include generated shader header file directory
 include_directories(${CMAKE_BINARY_DIR})

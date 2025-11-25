@@ -14,6 +14,7 @@
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
+#include "shader/test_triangle.glsl.h"
 
 #include <iostream>
 #include <vector>
@@ -31,6 +32,7 @@ struct Vertex {
     float uv[2];
 };
 
+
 // Application state
 struct {
     sg_pipeline pip;
@@ -45,13 +47,18 @@ struct {
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
     
+    // Test triangle buffers
+    sg_buffer test_vertex_buffer = {0};
+    sg_pipeline test_pipeline = {0};
+    
     float time = 0.0f;
     bool model_loaded = false;
     bool motion_loaded = false;
+    bool test_mode = true;  // Start with test mode
     
     // Camera parameters
-    HMM_Vec3 camera_pos = {0.0f, 10.0f, 30.0f};
-    HMM_Vec3 camera_target = {0.0f, 10.0f, 0.0f};
+    HMM_Vec3 camera_pos = {0.0f, 0.0f, 5.0f};  // Closer to model
+    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};  // Look at origin
     float camera_fov = 45.0f;
     
     std::string model_filename;
@@ -222,31 +229,105 @@ void UpdateModelBuffers() {
     // Update bindings
     g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
     g_state.bind.index_buffer = g_state.index_buffer;
+    
+    std::cout << "Updated model buffers: " << vertices.size() << " vertices, " << indices.size() << " indices" << std::endl;
+    std::cout << "  Vertex buffer id: " << g_state.vertex_buffer.id << std::endl;
+    std::cout << "  Index buffer id: " << g_state.index_buffer.id << std::endl;
+}
+
+// Create test triangle (following sokol triangle-sapp example)
+void CreateTestTriangle() {
+    // Simple triangle vertices with colors (following triangle-sapp example format)
+    // positions (vec4) + colors (vec4)
+    float vertices[] = {
+        // positions            // colors
+         0.0f,  0.5f, 0.5f, 1.0f,   1.0f, 0.0f, 0.0f, 1.0f,  // Red
+         0.5f, -0.5f, 0.5f, 1.0f,   0.0f, 1.0f, 0.0f, 1.0f,  // Green
+        -0.5f, -0.5f, 0.5f, 1.0f,   0.0f, 0.0f, 1.0f, 1.0f,  // Blue
+    };
+    
+    // Create vertex buffer
+    sg_buffer_desc vbuf_desc = {};
+    vbuf_desc.data = SG_RANGE(vertices);
+    vbuf_desc.label = "test-triangle-vertices";
+    g_state.test_vertex_buffer = sg_make_buffer(&vbuf_desc);
+    
+    // Create shader from code-generated sg_shader_desc
+    sg_shader test_shd = sg_make_shader(triangle_shader_desc(sg_query_backend()));
+    
+    if (test_shd.id == SG_INVALID_ID) {
+        std::cerr << "Error: Failed to create test shader" << std::endl;
+    } else {
+        std::cout << "Test shader created successfully, id: " << test_shd.id << std::endl;
+    }
+    
+    // Create pipeline (following triangle-sapp example, using C++ compatible syntax)
+    sg_pipeline_desc pip_desc = {};
+    pip_desc.shader = test_shd;
+    pip_desc.layout.attrs[ATTR_triangle_position].format = SG_VERTEXFORMAT_FLOAT4;
+    pip_desc.layout.attrs[ATTR_triangle_color0].format = SG_VERTEXFORMAT_FLOAT4;
+    pip_desc.label = "test-triangle-pipeline";
+    g_state.test_pipeline = sg_make_pipeline(&pip_desc);
+    
+    if (g_state.test_pipeline.id == SG_INVALID_ID) {
+        std::cerr << "Error: Failed to create test pipeline" << std::endl;
+    } else {
+        std::cout << "Test pipeline created successfully, id: " << g_state.test_pipeline.id << std::endl;
+    }
+    
+    std::cout << "Test triangle created:" << std::endl;
+    std::cout << "  Test vertex buffer id: " << g_state.test_vertex_buffer.id << std::endl;
 }
 
 // Initialization function
 void init(void) {
-    sg_desc _sg_desc{};
+    // Setup sokol-gfx (following triangle-sapp example, using C++ compatible syntax)
+    sg_desc _sg_desc = {};
     _sg_desc.environment = sglue_environment();
     _sg_desc.logger.func = slog_func;
-
     sg_setup(&_sg_desc);
+    
+    // Create test triangle first
+    CreateTestTriangle();
     
     // Create shader (using generated shader descriptor)
     sg_shader shd = sg_make_shader(mmd_mmd_shader_desc(sg_query_backend()));
     
+    // Verify shader creation
+    if (shd.id == SG_INVALID_ID) {
+        std::cerr << "Error: Failed to create shader" << std::endl;
+    } else {
+        std::cout << "Shader created successfully, id: " << shd.id << std::endl;
+    }
+    
     // Create render pipeline
     sg_pipeline_desc _sg_pipeline_desc{};
     _sg_pipeline_desc.shader = shd;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal] = { .offset = sizeof(float) * 3, .format = SG_VERTEXFORMAT_FLOAT3 };
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
+    
+    // Set vertex layout with stride
+    _sg_pipeline_desc.layout.buffers[0].stride = sizeof(Vertex);
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position].offset = 0;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position].format = SG_VERTEXFORMAT_FLOAT3;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal].offset = sizeof(float) * 3;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal].format = SG_VERTEXFORMAT_FLOAT3;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0].offset = sizeof(float) * 6;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0].format = SG_VERTEXFORMAT_FLOAT2;
+    
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
-    _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
+    _sg_pipeline_desc.cull_mode = SG_CULLMODE_NONE;  // Disable culling for debugging
+    _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
+    _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     _sg_pipeline_desc.label = "model-pipeline";
 
     g_state.pip = sg_make_pipeline(&_sg_pipeline_desc);
+    
+    // Verify pipeline creation
+    if (g_state.pip.id == SG_INVALID_ID) {
+        std::cerr << "Error: Failed to create pipeline" << std::endl;
+    } else {
+        std::cout << "Pipeline created successfully, id: " << g_state.pip.id << std::endl;
+    }
     
     // Set clear color
     g_state.pass_action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.1f,0.1f, 0.15f, 1.0f} };
@@ -294,9 +375,12 @@ void frame(void) {
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
     HMM_Mat4 mvp = HMM_Mul(proj, HMM_Mul(view, model_mat));
     
+    // Transpose matrix for shader (shaders typically expect column-major)
+    HMM_Mat4 mvp_transposed = HMM_TransposeM4(mvp);
+    
     // Prepare uniform data
     mmd_vs_params_t params;
-    params.mvp = mvp;
+    params.mvp = mvp_transposed;
     
     // Begin rendering
     sg_pass _sg_pass{};
@@ -305,18 +389,98 @@ void frame(void) {
 
     sg_begin_pass(&_sg_pass);
     
-    if (g_state.model_loaded && g_state.vertex_buffer.id != 0) {
+    // Set viewport and scissor
+    sg_apply_viewport(0, 0, width, height, true);
+    sg_apply_scissor_rect(0, 0, width, height, true);
+    
+    // Test mode: draw simple triangle (following triangle-sapp example)
+    if (g_state.test_mode && g_state.test_pipeline.id != 0) {
+        // Apply test pipeline
+        sg_apply_pipeline(g_state.test_pipeline);
+        
+        // Apply bindings (no index buffer needed, just vertex buffer)
+        sg_bindings test_bind = {};
+        test_bind.vertex_buffers[0] = g_state.test_vertex_buffer;
+        sg_apply_bindings(&test_bind);
+        
+        // Draw test triangle (following triangle-sapp example: sg_draw(0, 3, 1))
+        static int test_draw_count = 0;
+        if (test_draw_count < 3) {
+            std::cout << "Drawing test triangle, frame " << test_draw_count << std::endl;
+            std::cout << "  Test vertex buffer: " << g_state.test_vertex_buffer.id << std::endl;
+            std::cout << "  Test pipeline: " << g_state.test_pipeline.id << std::endl;
+            test_draw_count++;
+        }
+        sg_draw(0, 3, 1);
+    }
+    // Model mode: draw loaded model
+    else if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         // Apply pipeline first
         sg_apply_pipeline(g_state.pip);
         
         // Apply uniforms (must be after sg_apply_pipeline and inside pass)
         sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
         
+        // Ensure bindings are up to date
+        g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
+        g_state.bind.index_buffer = g_state.index_buffer;
+        g_state.bind.index_buffer_offset = 0;
+        
         // Apply bindings
         sg_apply_bindings(&g_state.bind);
         
-        // Draw
-        sg_draw(0, (int)(g_state.model->GetTriangleNum() * 3), 1);
+        // Verify bindings
+        if (g_state.bind.vertex_buffers[0].id == SG_INVALID_ID) {
+            std::cerr << "Error: Invalid vertex buffer in bindings" << std::endl;
+        }
+        if (g_state.bind.index_buffer.id == SG_INVALID_ID) {
+            std::cerr << "Error: Invalid index buffer in bindings" << std::endl;
+        }
+        
+        // Draw with index buffer (base_element is the starting index in the index buffer)
+        int num_indices = (int)(g_state.model->GetTriangleNum() * 3);
+        if (num_indices > 0) {
+            static int draw_count = 0;
+            if (draw_count < 5) {
+                std::cout << "Drawing frame " << draw_count << ": " << num_indices << " indices" << std::endl;
+                // Debug MVP matrix
+                std::cout << "  Camera pos: (" << g_state.camera_pos.X << ", " << g_state.camera_pos.Y << ", " << g_state.camera_pos.Z << ")" << std::endl;
+                std::cout << "  Camera target: (" << g_state.camera_target.X << ", " << g_state.camera_target.Y << ", " << g_state.camera_target.Z << ")" << std::endl;
+                std::cout << "  Viewport: " << width << "x" << height << std::endl;
+                const float* mvp_data = (const float*)&mvp_transposed;
+                std::cout << "  MVP matrix (first 4 elements): " << mvp_data[0] << ", " << mvp_data[1] << ", " << mvp_data[2] << ", " << mvp_data[3] << std::endl;
+                draw_count++;
+            }
+            // base_element: starting index in index buffer, num_elements: number of indices to draw
+            sg_draw(0, num_indices, 1);
+        } else {
+            static bool printed = false;
+            if (!printed) {
+                std::cout << "Warning: num_indices is 0, not drawing" << std::endl;
+                printed = true;
+            }
+        }
+    } else {
+        // Debug: print why we're not drawing
+        if (!g_state.model_loaded) {
+            static bool printed = false;
+            if (!printed) {
+                std::cout << "Not drawing: model not loaded" << std::endl;
+                printed = true;
+            }
+        } else if (g_state.vertex_buffer.id == 0) {
+            static bool printed = false;
+            if (!printed) {
+                std::cout << "Not drawing: vertex buffer not created" << std::endl;
+                printed = true;
+            }
+        } else if (g_state.index_buffer.id == 0) {
+            static bool printed = false;
+            if (!printed) {
+                std::cout << "Not drawing: index buffer not created" << std::endl;
+                printed = true;
+            }
+        }
     }
     
     sg_end_pass();

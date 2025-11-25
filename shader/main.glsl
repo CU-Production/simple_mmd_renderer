@@ -30,9 +30,18 @@ in vec3 norm;
 out vec4 frag_color;
 
 void main() {
-    vec3 light_dir = normalize(vec3(1.0, 1.0, 1.0));
-    float ndotl = max(dot(normalize(norm), light_dir), 0.3);
-    frag_color = vec4(vec3(0.8, 0.8, 0.9) * ndotl, 1.0);
+    // For test mode: use normal as color (when normal contains color data)
+    // For model mode: use lighting
+    // Check if normal values are in color range (0-1) vs normal range (-1 to 1)
+    if (norm.x > 0.5f || norm.y > 0.5f || norm.z > 0.5f) {
+        // Likely color data, use directly
+        frag_color = vec4(norm, 1.0);
+    } else {
+        // Likely normal data, use lighting
+        vec3 light_dir = normalize(vec3(1.0, 1.0, 1.0));
+        float ndotl = max(dot(normalize(norm), light_dir), 0.3);
+        frag_color = vec4(vec3(0.8, 0.8, 0.9) * ndotl, 1.0);
+    }
 }
 @end
 
