@@ -368,7 +368,6 @@ void frame(void) {
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
     HMM_Mat4 mvp = proj * view * model_mat;
 
-
     // Prepare uniform data
     mmd_vs_params_t params;
     params.mvp = mvp;
