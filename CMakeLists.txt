@@ -73,9 +73,6 @@ set(SHADER_LANG "glsl430:hlsl5:metal_macos")
 set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/main.glsl)
 set(SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/main.glsl.h)
 
-set(TEST_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/test_triangle.glsl)
-set(TEST_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/test_triangle.glsl.h)
-
 # Create shader output directory
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/shader)
 
@@ -88,18 +85,6 @@ add_custom_command(
         --slang ${SHADER_LANG}
     DEPENDS ${SHADER_SRC}
     COMMENT "Compiling shader ${SHADER_SRC} -> ${SHADER_HEADER}"
-    VERBATIM
-)
-
-# Add custom command to compile test shader
-add_custom_command(
-    OUTPUT ${TEST_SHADER_HEADER}
-    COMMAND ${SOKOL_SHDC_COMMAND}
-        --input ${TEST_SHADER_SRC}
-        --output ${TEST_SHADER_HEADER}
-        --slang ${SHADER_LANG}
-    DEPENDS ${TEST_SHADER_SRC}
-    COMMENT "Compiling shader ${TEST_SHADER_SRC} -> ${TEST_SHADER_HEADER}"
     VERBATIM
 )
 

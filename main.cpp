@@ -14,7 +14,6 @@
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
-#include "shader/test_triangle.glsl.h"
 
 #include <iostream>
 #include <vector>
@@ -46,17 +45,12 @@ struct {
     
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
-    
-    // Test triangle buffers
-    sg_buffer test_vertex_buffer = {0};
-    sg_buffer test_index_buffer = {0};
-    sg_pipeline test_pipeline = {0};
+
     
     float time = 0.0f;
     bool model_loaded = false;
     bool motion_loaded = false;
-    bool test_mode = false;  // Start with test mode
-    
+
     // Camera parameters
     HMM_Vec3 camera_pos = {0.0f, 10.0f, 40.0f};
     HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};
@@ -245,46 +239,6 @@ void UpdateModelBuffers() {
     g_state.bind.index_buffer = g_state.index_buffer;
 }
 
-// Create test triangle (following sokol triangle-sapp example)
-void CreateTestTriangle() {
-    // Simple triangle vertices with colors (following triangle-sapp example format)
-    // positions (vec4) + colors (vec4)
-    float vertices[] = {
-        // positions            // colors
-        -0.5f, -0.5f, 0.5f, 1.0f,   1.0f, 0.0f, 0.0f, 1.0f,  // Red
-         0.5f, -0.5f, 0.5f, 1.0f,   0.0f, 1.0f, 0.0f, 1.0f,  // Green
-         0.5f,  0.5f, 0.5f, 1.0f,   0.0f, 0.0f, 1.0f, 1.0f,  // Blue
-        -0.5f,  0.5f, 0.5f, 1.0f,   1.0f, 1.0f, 1.0f, 1.0f,  // White
-    };
-
-    const uint32_t indices[] = { 0, 1, 2, 0, 2, 3, };
-    
-    // Create vertex buffer
-    sg_buffer_desc vbuf_desc = {};
-    vbuf_desc.data = SG_RANGE(vertices);
-    vbuf_desc.label = "test-triangle-vertices";
-    g_state.test_vertex_buffer = sg_make_buffer(&vbuf_desc);
-
-    // Create index buffer
-    sg_buffer_desc ibuf_desc = {};
-    ibuf_desc.usage.index_buffer = true;
-    ibuf_desc.data = SG_RANGE(indices);
-    ibuf_desc.label = "test-triangle-indices";
-    g_state.test_index_buffer = sg_make_buffer(&ibuf_desc);
-    
-    // Create shader from code-generated sg_shader_desc
-    sg_shader test_shd = sg_make_shader(triangle_shader_desc(sg_query_backend()));
-    
-    // Create pipeline (following triangle-sapp example, using C++ compatible syntax)
-    sg_pipeline_desc pip_desc = {};
-    pip_desc.shader = test_shd;
-    pip_desc.layout.attrs[ATTR_triangle_position].format = SG_VERTEXFORMAT_FLOAT4;
-    pip_desc.layout.attrs[ATTR_triangle_color0].format = SG_VERTEXFORMAT_FLOAT4;
-    pip_desc.index_type = SG_INDEXTYPE_UINT32;
-    pip_desc.label = "test-triangle-pipeline";
-    g_state.test_pipeline = sg_make_pipeline(&pip_desc);
-}
-
 // Initialization function
 void init(void) {
     // Setup sokol-gfx (following triangle-sapp example, using C++ compatible syntax)
@@ -292,9 +246,6 @@ void init(void) {
     _sg_desc.environment = sglue_environment();
     _sg_desc.logger.func = slog_func;
     sg_setup(&_sg_desc);
-    
-    // Create test triangle first
-    CreateTestTriangle();
     
     // Create shader (using generated shader descriptor)
     sg_shader shd = sg_make_shader(mmd_mmd_shader_desc(sg_query_backend()));
@@ -305,12 +256,9 @@ void init(void) {
     
     // Set vertex layout with stride
     _sg_pipeline_desc.layout.buffers[0].stride = sizeof(Vertex);
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position].offset = 0;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position].format = SG_VERTEXFORMAT_FLOAT3;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal].offset = sizeof(float) * 3;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal].format = SG_VERTEXFORMAT_FLOAT3;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0].offset = sizeof(float) * 6;
-    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0].format = SG_VERTEXFORMAT_FLOAT2;
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_position] =  { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_normal] = { .offset = sizeof(float) * 3, .format = SG_VERTEXFORMAT_FLOAT3 };
+    _sg_pipeline_desc.layout.attrs[ATTR_mmd_mmd_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
     
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
@@ -378,22 +326,7 @@ void frame(void) {
     _sg_pass.swapchain = sglue_swapchain();
 
     sg_begin_pass(&_sg_pass);
-    
-    // Set viewport and scissor
-    sg_apply_viewport(0, 0, width, height, true);
-    sg_apply_scissor_rect(0, 0, width, height, true);
-    
-    // Test mode: draw simple square
-    if (g_state.test_mode && g_state.test_pipeline.id != 0) {
-        sg_apply_pipeline(g_state.test_pipeline);
-        
-        sg_bindings test_bind = {};
-        test_bind.vertex_buffers[0] = g_state.test_vertex_buffer;
-        test_bind.index_buffer = g_state.test_index_buffer;
-        sg_apply_bindings(&test_bind);
-        
-        sg_draw(0, 6, 1);
-    }
+
     // Model mode: draw loaded model
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
