@@ -39,7 +39,8 @@ struct {
     
     std::shared_ptr<mmd::Model> model;
     std::shared_ptr<mmd::Motion> motion;
-    mmd::Poser poser;
+    std::unique_ptr<mmd::Poser> poser;
+    std::unique_ptr<mmd::MotionPlayer> motion_player;
     
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
@@ -100,6 +101,15 @@ bool LoadPMXModel(const std::string& filename) {
         reader.ReadModel(*g_state.model);
         g_state.model_loaded = true;
         
+        // Create poser for the model
+        if (g_state.model) {
+            g_state.poser = std::make_unique<mmd::Poser>(*g_state.model);
+            // Create motion player if motion is already loaded
+            if (g_state.motion && g_state.poser) {
+                g_state.motion_player = std::make_unique<mmd::MotionPlayer>(*g_state.motion, *g_state.poser);
+            }
+        }
+        
         std::wstring model_name = g_state.model->GetName();
         std::string model_name_utf8 = wstring_to_utf8(model_name);
         std::cout << "Loaded PMX model: " << model_name_utf8 << std::endl;
@@ -127,6 +137,11 @@ bool LoadVMDMotion(const std::string& filename) {
         g_state.motion = std::make_shared<mmd::Motion>();
         reader.ReadMotion(*g_state.motion);
         g_state.motion_loaded = true;
+        
+        // Create motion player if both model and motion are loaded
+        if (g_state.model && g_state.motion && g_state.poser) {
+            g_state.motion_player = std::make_unique<mmd::MotionPlayer>(*g_state.motion, *g_state.poser);
+        }
         
         std::wstring motion_name = g_state.motion->GetName();
         std::string motion_name_utf8 = wstring_to_utf8(motion_name);
@@ -260,15 +275,14 @@ void frame(void) {
     g_state.time += dt;
     
     // Update animation
-    if (g_state.model_loaded && g_state.motion_loaded && g_state.model && g_state.motion) {
+    if (g_state.model_loaded && g_state.motion_loaded && g_state.motion_player && g_state.poser) {
         // Calculate current frame (assuming 30 FPS)
-        float frame_time = g_state.time * 30.0f;
+        size_t frame = static_cast<size_t>(g_state.time * 30.0f);
         
-        // Apply motion to model
-        g_state.poser.SetModel(g_state.model.get());
-        g_state.poser.SetMotion(g_state.motion.get());
-        g_state.poser.SetFrame(frame_time);
-        g_state.poser.Update();
+        // Seek to current frame and apply motion
+        g_state.motion_player->SeekFrame(frame);
+        g_state.poser->ResetPosing();
+        g_state.poser->Deform();
     }
     
     int width = sapp_width();
