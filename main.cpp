@@ -294,10 +294,9 @@ void frame(void) {
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
     HMM_Mat4 mvp = HMM_Mul(proj, HMM_Mul(view, model_mat));
     
-    // Update uniform buffer
+    // Prepare uniform data
     mmd_vs_params_t params;
     params.mvp = mvp;
-    sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
     
     // Begin rendering
     sg_pass _sg_pass{};
@@ -307,9 +306,16 @@ void frame(void) {
     sg_begin_pass(&_sg_pass);
     
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0) {
+        // Apply pipeline first
         sg_apply_pipeline(g_state.pip);
+        
+        // Apply uniforms (must be after sg_apply_pipeline and inside pass)
+        sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
+        
+        // Apply bindings
         sg_apply_bindings(&g_state.bind);
         
+        // Draw
         sg_draw(0, (int)(g_state.model->GetTriangleNum() * 3), 1);
     }
     
