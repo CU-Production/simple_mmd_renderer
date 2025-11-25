@@ -49,6 +49,7 @@ struct {
     
     // Test triangle buffers
     sg_buffer test_vertex_buffer = {0};
+    sg_buffer test_index_buffer = {0};
     sg_pipeline test_pipeline = {0};
     
     float time = 0.0f;
@@ -220,11 +221,22 @@ void UpdateModelBuffers() {
     g_state.vertex_buffer = sg_make_buffer(&vbuf_desc);
     
     // Create index buffer
+    if (indices.empty()) {
+        std::cerr << "Error: Index data is empty!" << std::endl;
+        return;
+    }
     sg_buffer_desc ibuf_desc = {};
     ibuf_desc.usage.index_buffer = true;
     ibuf_desc.data = SG_RANGE(indices);
     ibuf_desc.label = "model-indices";
     g_state.index_buffer = sg_make_buffer(&ibuf_desc);
+    
+    if (g_state.index_buffer.id == SG_INVALID_ID) {
+        std::cerr << "Error: Failed to create index buffer!" << std::endl;
+        return;
+    }
+    
+    std::cout << "  Index buffer created with " << indices.size() << " indices" << std::endl;
     
     // Update bindings
     g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
@@ -241,16 +253,26 @@ void CreateTestTriangle() {
     // positions (vec4) + colors (vec4)
     float vertices[] = {
         // positions            // colors
-         0.0f,  0.5f, 0.5f, 1.0f,   1.0f, 0.0f, 0.0f, 1.0f,  // Red
+        -0.5f, -0.5f, 0.5f, 1.0f,   1.0f, 0.0f, 0.0f, 1.0f,  // Red
          0.5f, -0.5f, 0.5f, 1.0f,   0.0f, 1.0f, 0.0f, 1.0f,  // Green
-        -0.5f, -0.5f, 0.5f, 1.0f,   0.0f, 0.0f, 1.0f, 1.0f,  // Blue
+         0.5f,  0.5f, 0.5f, 1.0f,   0.0f, 0.0f, 1.0f, 1.0f,  // Blue
+        -0.5f,  0.5f, 0.5f, 1.0f,   1.0f, 1.0f, 1.0f, 1.0f,  // White
     };
+
+    const uint32_t indices[] = { 0, 1, 2, 0, 2, 3, };
     
     // Create vertex buffer
     sg_buffer_desc vbuf_desc = {};
     vbuf_desc.data = SG_RANGE(vertices);
     vbuf_desc.label = "test-triangle-vertices";
     g_state.test_vertex_buffer = sg_make_buffer(&vbuf_desc);
+
+    // Create index buffer
+    sg_buffer_desc ibuf_desc = {};
+    ibuf_desc.usage.index_buffer = true;
+    ibuf_desc.data = SG_RANGE(indices);
+    ibuf_desc.label = "test-triangle-indices";
+    g_state.test_index_buffer = sg_make_buffer(&ibuf_desc);
     
     // Create shader from code-generated sg_shader_desc
     sg_shader test_shd = sg_make_shader(triangle_shader_desc(sg_query_backend()));
@@ -266,6 +288,7 @@ void CreateTestTriangle() {
     pip_desc.shader = test_shd;
     pip_desc.layout.attrs[ATTR_triangle_position].format = SG_VERTEXFORMAT_FLOAT4;
     pip_desc.layout.attrs[ATTR_triangle_color0].format = SG_VERTEXFORMAT_FLOAT4;
+    pip_desc.index_type = SG_INDEXTYPE_UINT32;
     pip_desc.label = "test-triangle-pipeline";
     g_state.test_pipeline = sg_make_pipeline(&pip_desc);
     
@@ -401,6 +424,7 @@ void frame(void) {
         // Apply bindings (no index buffer needed, just vertex buffer)
         sg_bindings test_bind = {};
         test_bind.vertex_buffers[0] = g_state.test_vertex_buffer;
+        test_bind.index_buffer = g_state.test_index_buffer;
         sg_apply_bindings(&test_bind);
         
         // Draw test triangle (following triangle-sapp example: sg_draw(0, 3, 1))
@@ -408,18 +432,26 @@ void frame(void) {
         if (test_draw_count < 3) {
             std::cout << "Drawing test triangle, frame " << test_draw_count << std::endl;
             std::cout << "  Test vertex buffer: " << g_state.test_vertex_buffer.id << std::endl;
+            std::cout << "  Test index buffer: " << g_state.test_index_buffer.id << std::endl;
             std::cout << "  Test pipeline: " << g_state.test_pipeline.id << std::endl;
             test_draw_count++;
         }
-        sg_draw(0, 3, 1);
+        sg_draw(0, 6, 1);
     }
     // Model mode: draw loaded model
-    else if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
+    if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
+        static int draw_count = 0;
+        bool debug_frame = (draw_count < 5);
+        if (debug_frame) {
+            std::cout << "=== Drawing model frame " << draw_count << " ===" << std::endl;
+            std::cout << "  Pipeline id: " << g_state.pip.id << std::endl;
+            std::cout << "  Vertex buffer id: " << g_state.vertex_buffer.id << std::endl;
+            std::cout << "  Index buffer id: " << g_state.index_buffer.id << std::endl;
+        }
+        draw_count++;
+        
         // Apply pipeline first
         sg_apply_pipeline(g_state.pip);
-        
-        // Apply uniforms (must be after sg_apply_pipeline and inside pass)
-        sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
         
         // Ensure bindings are up to date
         g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
@@ -429,27 +461,25 @@ void frame(void) {
         // Apply bindings
         sg_apply_bindings(&g_state.bind);
         
-        // Verify bindings
-        if (g_state.bind.vertex_buffers[0].id == SG_INVALID_ID) {
-            std::cerr << "Error: Invalid vertex buffer in bindings" << std::endl;
+        // Apply uniforms (after pipeline and bindings)
+        // Check uniform data size matches shader expectation (16 bytes * 4 = 64 bytes for mat4)
+        if (debug_frame) {
+            std::cout << "  Uniform data size: " << sizeof(mmd_vs_params_t) << " bytes" << std::endl;
+            std::cout << "  Expected size for mat4: 64 bytes" << std::endl;
+            // Verify uniform block slot
+            std::cout << "  Uniform block slot: " << UB_mmd_vs_params << std::endl;
         }
-        if (g_state.bind.index_buffer.id == SG_INVALID_ID) {
-            std::cerr << "Error: Invalid index buffer in bindings" << std::endl;
-        }
+        // Try applying uniforms - if this fails validation, drawcall will be skipped
+        sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
         
-        // Draw with index buffer (base_element is the starting index in the index buffer)
+        // Draw with index buffer
         int num_indices = (int)(g_state.model->GetTriangleNum() * 3);
         if (num_indices > 0) {
-            static int draw_count = 0;
-            if (draw_count < 5) {
-                std::cout << "Drawing frame " << draw_count << ": " << num_indices << " indices" << std::endl;
-                // Debug MVP matrix
-                std::cout << "  Camera pos: (" << g_state.camera_pos.X << ", " << g_state.camera_pos.Y << ", " << g_state.camera_pos.Z << ")" << std::endl;
-                std::cout << "  Camera target: (" << g_state.camera_target.X << ", " << g_state.camera_target.Y << ", " << g_state.camera_target.Z << ")" << std::endl;
-                std::cout << "  Viewport: " << width << "x" << height << std::endl;
-                const float* mvp_data = (const float*)&mvp_transposed;
-                std::cout << "  MVP matrix (first 4 elements): " << mvp_data[0] << ", " << mvp_data[1] << ", " << mvp_data[2] << ", " << mvp_data[3] << std::endl;
-                draw_count++;
+            if (debug_frame) {
+                std::cout << "  Drawing " << num_indices << " indices" << std::endl;
+                std::cout << "  Pipeline state: " << (g_state.pip.id != 0 ? "valid" : "invalid") << std::endl;
+                std::cout << "  Vertex buffer state: " << (g_state.vertex_buffer.id != 0 ? "valid" : "invalid") << std::endl;
+                std::cout << "  Index buffer state: " << (g_state.index_buffer.id != 0 ? "valid" : "invalid") << std::endl;
             }
             // base_element: starting index in index buffer, num_elements: number of indices to draw
             sg_draw(0, num_indices, 1);
