@@ -36,6 +36,7 @@ struct Vertex {
 // Application state
 struct {
     sg_pipeline pip;
+    sg_bindings bind;
     sg_pass_action pass_action;
     
     std::shared_ptr<mmd::Model> model;
@@ -57,8 +58,8 @@ struct {
     bool test_mode = false;  // Start with test mode
     
     // Camera parameters
-    HMM_Vec3 camera_pos = {0.0f, 0.0f, 5.0f};  // Closer to model
-    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};  // Look at origin
+    HMM_Vec3 camera_pos = {0.0f, 10.0f, 20.0f};
+    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};
     float camera_fov = 45.0f;
     
     std::string model_filename;
@@ -239,13 +240,9 @@ void UpdateModelBuffers() {
         return;
     }
     
-    std::cout << "  Index buffer created with " << indices.size() << " indices" << std::endl;
-    
-
-    
-    std::cout << "Updated model buffers: " << vertices.size() << " vertices, " << indices.size() << " indices" << std::endl;
-    std::cout << "  Vertex buffer id: " << g_state.vertex_buffer.id << std::endl;
-    std::cout << "  Index buffer id: " << g_state.index_buffer.id << std::endl;
+    // Update bindings
+    g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
+    g_state.bind.index_buffer = g_state.index_buffer;
 }
 
 // Create test triangle (following sokol triangle-sapp example)
@@ -278,12 +275,6 @@ void CreateTestTriangle() {
     // Create shader from code-generated sg_shader_desc
     sg_shader test_shd = sg_make_shader(triangle_shader_desc(sg_query_backend()));
     
-    if (test_shd.id == SG_INVALID_ID) {
-        std::cerr << "Error: Failed to create test shader" << std::endl;
-    } else {
-        std::cout << "Test shader created successfully, id: " << test_shd.id << std::endl;
-    }
-    
     // Create pipeline (following triangle-sapp example, using C++ compatible syntax)
     sg_pipeline_desc pip_desc = {};
     pip_desc.shader = test_shd;
@@ -292,15 +283,6 @@ void CreateTestTriangle() {
     pip_desc.index_type = SG_INDEXTYPE_UINT32;
     pip_desc.label = "test-triangle-pipeline";
     g_state.test_pipeline = sg_make_pipeline(&pip_desc);
-    
-    if (g_state.test_pipeline.id == SG_INVALID_ID) {
-        std::cerr << "Error: Failed to create test pipeline" << std::endl;
-    } else {
-        std::cout << "Test pipeline created successfully, id: " << g_state.test_pipeline.id << std::endl;
-    }
-    
-    std::cout << "Test triangle created:" << std::endl;
-    std::cout << "  Test vertex buffer id: " << g_state.test_vertex_buffer.id << std::endl;
 }
 
 // Initialization function
@@ -317,13 +299,6 @@ void init(void) {
     // Create shader (using generated shader descriptor)
     sg_shader shd = sg_make_shader(mmd_mmd_shader_desc(sg_query_backend()));
     
-    // Verify shader creation
-    if (shd.id == SG_INVALID_ID) {
-        std::cerr << "Error: Failed to create shader" << std::endl;
-    } else {
-        std::cout << "Shader created successfully, id: " << shd.id << std::endl;
-    }
-    
     // Create render pipeline
     sg_pipeline_desc _sg_pipeline_desc{};
     _sg_pipeline_desc.shader = shd;
@@ -339,19 +314,12 @@ void init(void) {
     
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
-    _sg_pipeline_desc.cull_mode = SG_CULLMODE_NONE;  // Disable culling for debugging
+    _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     _sg_pipeline_desc.label = "model-pipeline";
 
     g_state.pip = sg_make_pipeline(&_sg_pipeline_desc);
-    
-    // Verify pipeline creation
-    if (g_state.pip.id == SG_INVALID_ID) {
-        std::cerr << "Error: Failed to create pipeline" << std::endl;
-    } else {
-        std::cout << "Pipeline created successfully, id: " << g_state.pip.id << std::endl;
-    }
     
     // Set clear color
     g_state.pass_action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.1f,0.1f, 0.15f, 1.0f} };
@@ -417,110 +385,31 @@ void frame(void) {
     sg_apply_viewport(0, 0, width, height, true);
     sg_apply_scissor_rect(0, 0, width, height, true);
     
-    // Test mode: draw simple triangle (following triangle-sapp example)
+    // Test mode: draw simple square
     if (g_state.test_mode && g_state.test_pipeline.id != 0) {
-        // Apply test pipeline
         sg_apply_pipeline(g_state.test_pipeline);
         
-        // Apply bindings (no index buffer needed, just vertex buffer)
         sg_bindings test_bind = {};
         test_bind.vertex_buffers[0] = g_state.test_vertex_buffer;
         test_bind.index_buffer = g_state.test_index_buffer;
         sg_apply_bindings(&test_bind);
         
-        // Draw test triangle (following triangle-sapp example: sg_draw(0, 3, 1))
-        static int test_draw_count = 0;
-        if (test_draw_count < 3) {
-            std::cout << "Drawing test triangle, frame " << test_draw_count << std::endl;
-            std::cout << "  Test vertex buffer: " << g_state.test_vertex_buffer.id << std::endl;
-            std::cout << "  Test index buffer: " << g_state.test_index_buffer.id << std::endl;
-            std::cout << "  Test pipeline: " << g_state.test_pipeline.id << std::endl;
-            test_draw_count++;
-        }
         sg_draw(0, 6, 1);
     }
     // Model mode: draw loaded model
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
-        static int draw_count = 0;
-        bool debug_frame = (draw_count < 5);
-        if (debug_frame) {
-            std::cout << "=== Drawing model frame " << draw_count << " ===" << std::endl;
-            std::cout << "  Pipeline id: " << g_state.pip.id << std::endl;
-            std::cout << "  Vertex buffer id: " << g_state.vertex_buffer.id << std::endl;
-            std::cout << "  Index buffer id: " << g_state.index_buffer.id << std::endl;
-        }
-        draw_count++;
-        
-        // Apply pipeline first
         sg_apply_pipeline(g_state.pip);
-        // sg_apply_pipeline(g_state.test_pipeline);
         
-        // Ensure bindings are up to date
-        // Update bindings
-        sg_bindings _bind = {};
-        _bind.vertex_buffers[0] = g_state.vertex_buffer;
-        _bind.index_buffer = g_state.index_buffer;
-
-        // Verify bindings before applying (same as test square)
-        if (debug_frame) {
-            std::cout << "  Binding check:" << std::endl;
-            std::cout << "    Vertex buffer in bindings: " << _bind.vertex_buffers[0].id << std::endl;
-            std::cout << "    Index buffer in bindings: " << _bind.index_buffer.id << std::endl;
-            std::cout << "    Index buffer offset: " << _bind.index_buffer_offset << std::endl;
-        }
+        sg_bindings bind = {};
+        bind.vertex_buffers[0] = g_state.vertex_buffer;
+        bind.index_buffer = g_state.index_buffer;
+        sg_apply_bindings(&bind);
         
-        // Apply bindings
-        sg_apply_bindings(&_bind);
-        
-        // Apply uniforms (after pipeline and bindings)
-        // Check uniform data size matches shader expectation (16 bytes * 4 = 64 bytes for mat4)
-        if (debug_frame) {
-            std::cout << "  Uniform data size: " << sizeof(mmd_vs_params_t) << " bytes" << std::endl;
-            std::cout << "  Expected size for mat4: 64 bytes" << std::endl;
-            // Verify uniform block slot
-            std::cout << "  Uniform block slot: " << UB_mmd_vs_params << std::endl;
-        }
-        // Try applying uniforms - if this fails validation, drawcall will be skipped
         sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(params));
         
-        // Draw with index buffer
         int num_indices = (int)(g_state.model->GetTriangleNum() * 3);
         if (num_indices > 0) {
-            if (debug_frame) {
-                std::cout << "  Drawing " << num_indices << " indices" << std::endl;
-                std::cout << "  Pipeline state: " << (g_state.pip.id != 0 ? "valid" : "invalid") << std::endl;
-                std::cout << "  Vertex buffer state: " << (g_state.vertex_buffer.id != 0 ? "valid" : "invalid") << std::endl;
-                std::cout << "  Index buffer state: " << (g_state.index_buffer.id != 0 ? "valid" : "invalid") << std::endl;
-            }
-            // base_element: starting index in index buffer, num_elements: number of indices to draw
             sg_draw(0, num_indices, 1);
-        } else {
-            static bool printed = false;
-            if (!printed) {
-                std::cout << "Warning: num_indices is 0, not drawing" << std::endl;
-                printed = true;
-            }
-        }
-    } else {
-        // Debug: print why we're not drawing
-        if (!g_state.model_loaded) {
-            static bool printed = false;
-            if (!printed) {
-                std::cout << "Not drawing: model not loaded" << std::endl;
-                printed = true;
-            }
-        } else if (g_state.vertex_buffer.id == 0) {
-            static bool printed = false;
-            if (!printed) {
-                std::cout << "Not drawing: vertex buffer not created" << std::endl;
-                printed = true;
-            }
-        } else if (g_state.index_buffer.id == 0) {
-            static bool printed = false;
-            if (!printed) {
-                std::cout << "Not drawing: index buffer not created" << std::endl;
-                printed = true;
-            }
         }
     }
     
