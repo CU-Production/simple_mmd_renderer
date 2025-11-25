@@ -58,7 +58,7 @@ struct {
     bool test_mode = false;  // Start with test mode
     
     // Camera parameters
-    HMM_Vec3 camera_pos = {0.0f, 10.0f, 20.0f};
+    HMM_Vec3 camera_pos = {0.0f, 10.0f, 40.0f};
     HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};
     float camera_fov = 45.0f;
     
