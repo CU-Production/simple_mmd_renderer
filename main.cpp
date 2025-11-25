@@ -366,15 +366,12 @@ void frame(void) {
     HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
-    // HMM_Mat4 mvp = HMM_Mul(proj, HMM_Mul(view, model_mat));
     HMM_Mat4 mvp = proj * view * model_mat;
 
-    // Transpose matrix for shader (shaders typically expect column-major)
-    HMM_Mat4 mvp_transposed = HMM_TransposeM4(mvp);
-    
+
     // Prepare uniform data
     mmd_vs_params_t params;
-    params.mvp = mvp_transposed;
+    params.mvp = mvp;
     
     // Begin rendering
     sg_pass _sg_pass{};
