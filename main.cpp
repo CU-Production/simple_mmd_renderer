@@ -314,7 +314,7 @@ void init(void) {
     
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
-    _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
+    // _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     _sg_pipeline_desc.label = "model-pipeline";
@@ -323,6 +323,7 @@ void init(void) {
     
     // Set clear color
     g_state.pass_action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.1f,0.1f, 0.15f, 1.0f} };
+    g_state.pass_action.depth = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f };
 
     // Initialize time
     stm_setup();
@@ -362,11 +363,12 @@ void frame(void) {
     int height = sapp_height();
     
     // Calculate MVP matrix
-    HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov, (float)width / (float)height, 0.1f, 1000.0f);
+    HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
-    HMM_Mat4 mvp = HMM_Mul(proj, HMM_Mul(view, model_mat));
-    
+    // HMM_Mat4 mvp = HMM_Mul(proj, HMM_Mul(view, model_mat));
+    HMM_Mat4 mvp = proj * view * model_mat;
+
     // Transpose matrix for shader (shaders typically expect column-major)
     HMM_Mat4 mvp_transposed = HMM_TransposeM4(mvp);
     
