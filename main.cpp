@@ -2,6 +2,7 @@
 #define SOKOL_TRACE_HOOKS
 #ifdef _WIN32
 // #define SOKOL_D3D11
+#define STBI_WINDOWS_UTF8
 #include <windows.h>
 #else
 // #define SOKOL_GLCORE
@@ -36,6 +37,11 @@
 #include <fstream>
 #include <algorithm>
 #include <cmath>
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#include <limits.h>
+#endif
 
 // Vertex structure
 struct Vertex {
@@ -193,6 +199,10 @@ struct {
     sg_buffer skybox_index_buffer = {0};
     bool ibl_initialized = false;
     bool show_skybox = true;
+    
+    // Material textures (map from material index to texture image)
+    std::vector<sg_image> material_textures;
+    sg_image default_texture = {0}; // White 1x1 texture for materials without texture
 } g_state;
 
 
@@ -226,6 +236,359 @@ std::string wstring_to_utf8(const std::wstring& wstr) {
 }
 #endif
 
+// Helper function to check if file exists (case-insensitive on Windows)
+bool FileExists(const std::wstring& path) {
+#ifdef _WIN32
+    DWORD dwAttrib = GetFileAttributesW(path.c_str());
+    if (dwAttrib != INVALID_FILE_ATTRIBUTES && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY)) {
+        return true;
+    }
+    // On Windows, try case-insensitive search if exact match fails
+    // Find the directory and filename parts
+    size_t last_slash = path.find_last_of(L"\\/");
+    if (last_slash != std::wstring::npos && last_slash + 1 < path.length()) {
+        std::wstring dir = path.substr(0, last_slash + 1);
+        std::wstring filename = path.substr(last_slash + 1);
+        
+        // Try to find file with case-insensitive match
+        WIN32_FIND_DATAW findData;
+        HANDLE hFind = FindFirstFileW(path.c_str(), &findData);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            FindClose(hFind);
+            return !(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+        }
+    }
+    return false;
+#else
+    struct stat buffer;
+    std::string path_utf8 = wstring_to_utf8(path);
+    return (stat(path_utf8.c_str(), &buffer) == 0);
+#endif
+}
+
+// Helper to get current working directory
+std::wstring GetCurrentWorkingDirectory() {
+#ifdef _WIN32
+    wchar_t buffer[MAX_PATH];
+    DWORD length = GetCurrentDirectoryW(MAX_PATH, buffer);
+    if (length > 0 && length < MAX_PATH) {
+        std::wstring cwd(buffer);
+        if (cwd.back() != L'\\' && cwd.back() != L'/') {
+            cwd += L'\\';
+        }
+        return cwd;
+    }
+    return L"";
+#else
+    char buffer[PATH_MAX];
+    if (getcwd(buffer, PATH_MAX) != nullptr) {
+        std::string cwd_str(buffer);
+        std::wstring cwd(cwd_str.begin(), cwd_str.end());
+        if (cwd.back() != L'/' && cwd.back() != L'\\') {
+            cwd += L'/';
+        }
+        return cwd;
+    }
+    return L"";
+#endif
+}
+
+// Helper to normalize path separators
+std::wstring NormalizePath(const std::wstring& path) {
+    std::wstring normalized = path;
+    std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+    return normalized;
+}
+
+// Helper to combine paths
+std::wstring CombinePaths(const std::wstring& base, const std::wstring& relative) {
+    if (relative.empty()) return base;
+    if (base.empty()) return relative;
+    
+    std::wstring base_norm = NormalizePath(base);
+    std::wstring rel_norm = NormalizePath(relative);
+    
+    // Ensure base ends with separator
+    if (base_norm.back() != L'\\' && base_norm.back() != L'/') {
+        base_norm += L'\\';
+    }
+    
+    // Remove leading separator from relative if present
+    if (!rel_norm.empty() && (rel_norm[0] == L'\\' || rel_norm[0] == L'/')) {
+        rel_norm = rel_norm.substr(1);
+    }
+    
+    return base_norm + rel_norm;
+}
+
+// Check if path is absolute
+bool IsAbsolutePath(const std::wstring& path) {
+    if (path.empty()) return false;
+#ifdef _WIN32
+    // Windows: check for drive letter (C:) or UNC path (\\)
+    if (path.length() >= 2) {
+        if (path[1] == L':') return true; // Drive letter
+        if (path[0] == L'\\' && path[1] == L'\\') return true; // UNC
+    }
+    return false;
+#else
+    return path[0] == L'/';
+#endif
+}
+
+// Helper function to find file with case-insensitive filename (Windows only)
+std::wstring FindFileCaseInsensitive(const std::wstring& dir, const std::wstring& filename) {
+#ifdef _WIN32
+    // On Windows, use FindFirstFile to do case-insensitive search
+    std::wstring search_path = CombinePaths(dir, filename);
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = FindFirstFileW(search_path.c_str(), &findData);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            return CombinePaths(dir, findData.cFileName);
+        }
+    }
+    return L"";
+#else
+    // On Linux/macOS, file system is case-sensitive, so just return empty
+    return L"";
+#endif
+}
+
+// Load texture from file path
+sg_image LoadTexture(const std::wstring& texture_path, const std::wstring& model_dir = L"") {
+    if (texture_path.empty()) {
+        return g_state.default_texture;
+    }
+    
+    // Try multiple path combinations
+    std::vector<std::wstring> paths_to_try;
+    
+    // 1. Use path as-is (may be absolute)
+    paths_to_try.push_back(NormalizePath(texture_path));
+    
+    // 2. If model_dir is provided, try model_dir + texture_path
+    if (!model_dir.empty()) {
+        paths_to_try.push_back(CombinePaths(model_dir, texture_path));
+    }
+    
+    // 3. If texture_path contains directory separators, try different combinations
+    if (!model_dir.empty() && !texture_path.empty()) {
+        size_t last_sep = texture_path.find_last_of(L"\\/");
+        if (last_sep != std::wstring::npos && last_sep + 1 < texture_path.length()) {
+            std::wstring filename_only = texture_path.substr(last_sep + 1);
+            std::wstring dir_part = texture_path.substr(0, last_sep + 1);
+            
+            // Try model_dir + filename_only (in case texture_path has extra directory prefix)
+            paths_to_try.push_back(CombinePaths(model_dir, filename_only));
+            
+            // Try model_dir + dir_part + filename_only (preserve subdirectory structure)
+            paths_to_try.push_back(CombinePaths(model_dir, texture_path));
+            
+            // Also try model_dir + "tex/" + filename_only (common MMD texture location)
+            paths_to_try.push_back(CombinePaths(CombinePaths(model_dir, L"tex"), filename_only));
+        } else {
+            // No directory separator, try both root and tex/ subdirectory
+            paths_to_try.push_back(CombinePaths(model_dir, texture_path));
+            paths_to_try.push_back(CombinePaths(CombinePaths(model_dir, L"tex"), texture_path));
+        }
+    }
+    
+    // 4. Try current working directory + texture_path (if path is relative)
+    if (!IsAbsolutePath(texture_path)) {
+        std::wstring cwd = GetCurrentWorkingDirectory();
+        if (!cwd.empty()) {
+            paths_to_try.push_back(CombinePaths(cwd, texture_path));
+        }
+    }
+    
+    // Try each path
+    std::wstring final_path;
+    bool found = false;
+    for (const auto& path : paths_to_try) {
+        if (FileExists(path)) {
+            final_path = path;
+            found = true;
+            break;
+        }
+    }
+    
+    // If not found and on Windows, try case-insensitive search in model_dir
+    if (!found && !model_dir.empty()) {
+#ifdef _WIN32
+        size_t last_sep = texture_path.find_last_of(L"\\/");
+        if (last_sep != std::wstring::npos && last_sep + 1 < texture_path.length()) {
+            std::wstring filename = texture_path.substr(last_sep + 1);
+            std::wstring found_path = FindFileCaseInsensitive(model_dir, filename);
+            if (!found_path.empty()) {
+                final_path = found_path;
+                found = true;
+            } else {
+                // Also try in tex/ subdirectory
+                found_path = FindFileCaseInsensitive(CombinePaths(model_dir, L"tex"), filename);
+                if (!found_path.empty()) {
+                    final_path = found_path;
+                    found = true;
+                }
+            }
+        } else {
+            // No directory separator, try case-insensitive search
+            std::wstring found_path = FindFileCaseInsensitive(model_dir, texture_path);
+            if (!found_path.empty()) {
+                final_path = found_path;
+                found = true;
+            } else {
+                found_path = FindFileCaseInsensitive(CombinePaths(model_dir, L"tex"), texture_path);
+                if (!found_path.empty()) {
+                    final_path = found_path;
+                    found = true;
+                }
+            }
+        }
+#endif
+    }
+    
+    if (!found) {
+        // Print all attempted paths for debugging (only first few to avoid spam)
+        static int debug_count = 0;
+        if (debug_count < 5) {
+            std::cerr << "Failed to load texture: " << wstring_to_utf8(texture_path) << std::endl;
+            std::cerr << "Model dir: " << wstring_to_utf8(model_dir) << std::endl;
+            std::cerr << "Tried paths:" << std::endl;
+            for (const auto& path : paths_to_try) {
+                std::cerr << "  " << wstring_to_utf8(path) << std::endl;
+            }
+            debug_count++;
+        }
+        return g_state.default_texture;
+    }
+    
+    // Convert wide string to UTF-8 for stb_image
+    // With STBI_WINDOWS_UTF8, stbi_load can handle UTF-8 paths directly on Windows
+    std::string path_utf8 = wstring_to_utf8(final_path);
+    
+    int width, height, channels;
+    unsigned char* data = stbi_load(path_utf8.c_str(), &width, &height, &channels, 4); // Force RGBA
+    if (!data) {
+        const char* error = stbi_failure_reason();
+        std::cerr << "Failed to load texture: " << path_utf8 << std::endl;
+        if (error) {
+            std::cerr << "  Error: " << error << std::endl;
+        }
+        return g_state.default_texture;
+    }
+    
+    // Validate loaded image data
+    if (width <= 0 || height <= 0) {
+        std::cerr << "Invalid texture dimensions: " << width << "x" << height << std::endl;
+        stbi_image_free(data);
+        return g_state.default_texture;
+    }
+    
+    sg_image_desc img_desc = {};
+    img_desc.type = SG_IMAGETYPE_2D;
+    img_desc.width = width;
+    img_desc.height = height;
+    img_desc.num_mipmaps = 1;
+    img_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    img_desc.usage.immutable = true;
+    img_desc.label = "material-texture";
+    img_desc.data.mip_levels[0].ptr = data;
+    img_desc.data.mip_levels[0].size = width * height * 4;
+    
+    sg_image img = sg_make_image(&img_desc);
+    stbi_image_free(data);
+    
+    if (img.id == SG_INVALID_ID) {
+        std::cerr << "Failed to create sokol image from texture data" << std::endl;
+        return g_state.default_texture;
+    }
+    
+    std::cout << "Loaded texture: " << path_utf8 << " (" << width << "x" << height << ", " << channels << " channels)" << std::endl;
+    return img;
+}
+
+// Helper to convert relative path to absolute path
+std::wstring GetAbsolutePath(const std::wstring& path) {
+    if (path.empty()) return path;
+    if (IsAbsolutePath(path)) return path;
+    
+#ifdef _WIN32
+    wchar_t full_path[MAX_PATH];
+    DWORD length = GetFullPathNameW(path.c_str(), MAX_PATH, full_path, nullptr);
+    if (length > 0 && length < MAX_PATH) {
+        return std::wstring(full_path);
+    }
+    return path;
+#else
+    char* resolved = realpath(wstring_to_utf8(path).c_str(), nullptr);
+    if (resolved) {
+        std::string resolved_str(resolved);
+        free(resolved);
+        return utf8_to_wstring(resolved_str);
+    }
+    return path;
+#endif
+}
+
+// Load all material textures from the model
+void LoadMaterialTextures(const std::string& model_filename) {
+    if (!g_state.model || !g_state.model_loaded) {
+        return;
+    }
+    
+    // Clean up old textures
+    for (auto& tex : g_state.material_textures) {
+        if (tex.id != 0 && tex.id != g_state.default_texture.id) {
+            sg_destroy_image(tex);
+        }
+    }
+    g_state.material_textures.clear();
+    
+    // Get model directory from filename (convert to absolute path first)
+    std::wstring model_dir;
+    if (!model_filename.empty()) {
+        std::wstring wfilename = utf8_to_wstring(model_filename);
+        // Convert to absolute path
+        wfilename = GetAbsolutePath(wfilename);
+        
+        size_t last_slash = wfilename.find_last_of(L"\\/");
+        if (last_slash != std::wstring::npos) {
+            model_dir = wfilename.substr(0, last_slash + 1);
+        } else {
+            // No directory separator, use current directory
+            model_dir = GetCurrentWorkingDirectory();
+        }
+    } else {
+        model_dir = GetCurrentWorkingDirectory();
+    }
+    
+    std::cout << "Model directory: " << wstring_to_utf8(model_dir) << std::endl;
+    
+    size_t part_num = g_state.model->GetPartNum();
+    g_state.material_textures.resize(part_num, g_state.default_texture);
+    
+    for (size_t i = 0; i < part_num; ++i) {
+        const mmd::Model::Part& part = g_state.model->GetPart(i);
+        const mmd::Material& material = part.GetMaterial();
+        
+        const mmd::Texture* texture = material.GetTexture();
+        if (texture) {
+            std::wstring texture_path = texture->GetTexturePath();
+            // Only print first few textures to avoid spam
+            if (i < 3) {
+                std::cout << "Loading texture " << i << ": " << wstring_to_utf8(texture_path) << std::endl;
+            }
+            g_state.material_textures[i] = LoadTexture(texture_path, model_dir);
+        } else {
+            g_state.material_textures[i] = g_state.default_texture;
+        }
+    }
+    
+    std::cout << "Loaded " << g_state.material_textures.size() << " material textures" << std::endl;
+}
+
 // Load PMX model
 bool LoadPMXModel(const std::string& filename) {
     try {
@@ -253,6 +616,10 @@ bool LoadPMXModel(const std::string& filename) {
         std::cout << "  Vertices: " << g_state.model->GetVertexNum() << std::endl;
         std::cout << "  Triangles: " << g_state.model->GetTriangleNum() << std::endl;
         std::cout << "  Bones: " << g_state.model->GetBoneNum() << std::endl;
+        std::cout << "  Parts: " << g_state.model->GetPartNum() << std::endl;
+        
+        // Load material textures (pass filename for path resolution)
+        LoadMaterialTextures(filename);
         
         return true;
     } catch (const mmd::exception& e) {
@@ -492,13 +859,31 @@ HMM_Vec3 EquirectUVToDir(float u, float v) {
 // Load HDR image and convert to cubemap (CPU-side conversion)
 bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     int width, height, nrComponents;
+    // With STBI_WINDOWS_UTF8, stbi_loadf can handle UTF-8 paths directly on Windows
     float* hdr_data = stbi_loadf(hdr_path.c_str(), &width, &height, &nrComponents, 0);
     if (!hdr_data) {
+        const char* error = stbi_failure_reason();
         std::cerr << "Failed to load HDR image: " << hdr_path << std::endl;
+        if (error) {
+            std::cerr << "  Error: " << error << std::endl;
+        }
         return false;
     }
     
-    std::cout << "Loaded HDR image: " << width << "x" << height << std::endl;
+    // Validate loaded image data
+    if (width <= 0 || height <= 0) {
+        std::cerr << "Invalid HDR image dimensions: " << width << "x" << height << std::endl;
+        stbi_image_free(hdr_data);
+        return false;
+    }
+    
+    if (nrComponents < 3) {
+        std::cerr << "HDR image must have at least 3 components (RGB), got: " << nrComponents << std::endl;
+        stbi_image_free(hdr_data);
+        return false;
+    }
+    
+    std::cout << "Loaded HDR image: " << width << "x" << height << " (" << nrComponents << " components)" << std::endl;
     
     // Create equirectangular texture (for reference, but we'll convert to cubemap)
     sg_image_desc equirect_desc = {};
@@ -1003,15 +1388,29 @@ void init(void) {
     // Create skybox geometry
     CreateSkyboxGeometry();
     
-    // Create default sampler for IBL
+    // Create default sampler for IBL and textures
     sg_sampler_desc sampler_desc = {};
     sampler_desc.min_filter = SG_FILTER_LINEAR;
     sampler_desc.mag_filter = SG_FILTER_LINEAR;
-    sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
-    sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.wrap_u = SG_WRAP_REPEAT;  // For textures, use repeat
+    sampler_desc.wrap_v = SG_WRAP_REPEAT;
     sampler_desc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
-    sampler_desc.label = "default-ibl-sampler";
+    sampler_desc.label = "default-sampler";
     g_state.default_sampler = sg_make_sampler(&sampler_desc);
+    
+    // Create default white texture (1x1 white RGBA)
+    unsigned char white_pixel[4] = {255, 255, 255, 255};
+    sg_image_desc default_tex_desc = {};
+    default_tex_desc.type = SG_IMAGETYPE_2D;
+    default_tex_desc.width = 1;
+    default_tex_desc.height = 1;
+    default_tex_desc.num_mipmaps = 1;
+    default_tex_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    default_tex_desc.usage.immutable = true;
+    default_tex_desc.label = "default-white-texture";
+    default_tex_desc.data.mip_levels[0].ptr = white_pixel;
+    default_tex_desc.data.mip_levels[0].size = 4;
+    g_state.default_texture = sg_make_image(&default_tex_desc);
     
     // Create skybox shader and pipeline
     sg_shader skybox_shd = sg_make_shader(ibl_skybox_shader_desc(sg_query_backend()));
@@ -1471,7 +1870,7 @@ void frame(void) {
         sg_destroy_view(cubemap_view);
     }
     
-    // Model mode: draw loaded model
+    // Model mode: draw loaded model (render by parts/materials)
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
         
@@ -1487,51 +1886,77 @@ void frame(void) {
         fs_params.metallic = 0.0f;  // Default metallic
         fs_params.ibl_strength = 1.0f;
         
-        sg_bindings bind = {};
-        bind.vertex_buffers[0] = g_state.vertex_buffer;
-        bind.index_buffer = g_state.index_buffer;
-        
-        // Bind IBL textures if available
-        if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
-            sg_view_desc irradiance_view_desc = {};
-            irradiance_view_desc.texture.image = g_state.irradiance_map;
-            sg_view irradiance_view = sg_make_view(&irradiance_view_desc);
+        // Render each part with its own texture
+        size_t part_num = g_state.model->GetPartNum();
+        for (size_t part_idx = 0; part_idx < part_num; ++part_idx) {
+            const mmd::Model::Part& part = g_state.model->GetPart(part_idx);
+            const size_t base_shift = part.GetBaseShift();
+            const size_t triangle_num = part.GetTriangleNum();
             
-            sg_view_desc prefilter_view_desc = {};
-            prefilter_view_desc.texture.image = g_state.prefilter_map;
-            sg_view prefilter_view = sg_make_view(&prefilter_view_desc);
+            if (triangle_num == 0) continue;
             
-            // TODO: These constants will be generated by sokol-shdc in shader/main.glsl.h
-            // After shader compilation, uncomment and use the correct slot indices:
-            // bind.views[VIEW_mmd_irradiance_map] = irradiance_view;
-            // bind.samplers[SMP_mmd_irradiance_smp] = g_state.default_sampler;
-            // bind.views[VIEW_mmd_prefilter_map] = prefilter_view;
-            // bind.samplers[SMP_mmd_prefilter_smp] = g_state.default_sampler;
-            // sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(vs_params));
-            // sg_apply_uniforms(UB_mmd_fs_params, SG_RANGE(fs_params));
-            // For now, use slots 0, 1 (will need to adjust after shader compilation)
-            bind.views[0] = irradiance_view;
-            bind.samplers[0] = g_state.default_sampler;
-            bind.views[1] = prefilter_view;
-            bind.samplers[1] = g_state.default_sampler;
+            sg_bindings bind = {};
+            bind.vertex_buffers[0] = g_state.vertex_buffer;
+            bind.index_buffer = g_state.index_buffer;
             
-            sg_apply_bindings(&bind);
-            sg_apply_uniforms(0, SG_RANGE(vs_params));
-            sg_apply_uniforms(2, SG_RANGE(fs_params));
+            // Bind material texture (slot 2 for diffuse texture)
+            sg_image material_tex = (part_idx < g_state.material_textures.size()) 
+                ? g_state.material_textures[part_idx] 
+                : g_state.default_texture;
             
-            sg_destroy_view(irradiance_view);
-            sg_destroy_view(prefilter_view);
-        } else {
-            sg_apply_bindings(&bind);
-            // TODO: UB_mmd_vs_params will be generated by sokol-shdc in shader/main.glsl.h
-            // After shader compilation, uncomment and use the correct uniform block slot:
-            // sg_apply_uniforms(UB_mmd_vs_params, SG_RANGE(vs_params));
-            sg_apply_uniforms(0, SG_RANGE(vs_params));
-        }
-        
-        int num_indices = (int)(g_state.model->GetTriangleNum() * 3);
-        if (num_indices > 0) {
-            sg_draw(0, num_indices, 1);
+            sg_view_desc material_view_desc = {};
+            material_view_desc.texture.image = material_tex;
+            sg_view material_view = sg_make_view(&material_view_desc);
+            
+            // Bind textures: slot 0=irradiance, slot 1=prefilter, slot 2=diffuse texture
+            if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
+                sg_view_desc irradiance_view_desc = {};
+                irradiance_view_desc.texture.image = g_state.irradiance_map;
+                sg_view irradiance_view = sg_make_view(&irradiance_view_desc);
+                
+                sg_view_desc prefilter_view_desc = {};
+                prefilter_view_desc.texture.image = g_state.prefilter_map;
+                sg_view prefilter_view = sg_make_view(&prefilter_view_desc);
+                
+                // TODO: These constants will be generated by sokol-shdc in shader/main.glsl.h
+                bind.views[0] = irradiance_view;
+                bind.samplers[0] = g_state.default_sampler;
+                bind.views[1] = prefilter_view;
+                bind.samplers[1] = g_state.default_sampler;
+                bind.views[2] = material_view;
+                bind.samplers[2] = g_state.default_sampler;
+                
+                sg_apply_bindings(&bind);
+                sg_apply_uniforms(0, SG_RANGE(vs_params));
+                sg_apply_uniforms(3, SG_RANGE(fs_params)); // fs_params is now binding 3
+                
+                sg_destroy_view(irradiance_view);
+                sg_destroy_view(prefilter_view);
+            } else {
+                // No IBL, but still bind texture
+                bind.views[2] = material_view;
+                bind.samplers[2] = g_state.default_sampler;
+                
+                // Create dummy fs_params for shader (even without IBL, shader expects it)
+                mmd_fs_params_t fs_params_no_ibl;
+                fs_params_no_ibl.view_pos = g_state.camera_pos;
+                fs_params_no_ibl.roughness = 0.5f;
+                fs_params_no_ibl.metallic = 0.0f;
+                fs_params_no_ibl.ibl_strength = 0.0f; // Disable IBL
+                
+                sg_apply_bindings(&bind);
+                sg_apply_uniforms(0, SG_RANGE(vs_params));
+                sg_apply_uniforms(3, SG_RANGE(fs_params_no_ibl));
+            }
+            
+            sg_destroy_view(material_view);
+            
+            // Draw this part's triangles
+            int index_offset = (int)(base_shift * 3);
+            int index_count = (int)(triangle_num * 3);
+            if (index_count > 0) {
+                sg_draw(index_offset, index_count, 1);
+            }
         }
     }
     
@@ -1674,6 +2099,15 @@ void cleanup(void) {
     }
     if (g_state.default_sampler.id != 0) {
         sg_destroy_sampler(g_state.default_sampler);
+    }
+    // Clean up material textures
+    for (auto& tex : g_state.material_textures) {
+        if (tex.id != 0 && tex.id != g_state.default_texture.id) {
+            sg_destroy_image(tex);
+        }
+    }
+    if (g_state.default_texture.id != 0) {
+        sg_destroy_image(g_state.default_texture);
     }
     sgimgui_discard(&g_state.sgimgui);
     simgui_shutdown();
