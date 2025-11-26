@@ -63,9 +63,11 @@ endif()
 # Generate all required shader languages to support cross-platform
 set(SHADER_LANG "glsl430:hlsl5:metal_macos")
 
-# Compile shader file
+# Compile shader files
 set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/main.glsl)
 set(SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/main.glsl.h)
+set(IBL_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/ibl.glsl)
+set(IBL_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/ibl.glsl.h)
 
 # Create shader output directory
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/shader)
@@ -82,8 +84,20 @@ add_custom_command(
     VERBATIM
 )
 
+# Add custom command to compile IBL shader
+add_custom_command(
+    OUTPUT ${IBL_SHADER_HEADER}
+    COMMAND ${SOKOL_SHDC_COMMAND}
+        --input ${IBL_SHADER_SRC}
+        --output ${IBL_SHADER_HEADER}
+        --slang ${SHADER_LANG}
+    DEPENDS ${IBL_SHADER_SRC}
+    COMMENT "Compiling shader ${IBL_SHADER_SRC} -> ${IBL_SHADER_HEADER}"
+    VERBATIM
+)
+
 # Create shader header file target
-add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${TEST_SHADER_HEADER})
+add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${IBL_SHADER_HEADER})
 
 # Include generated shader header file directory
 include_directories(${CMAKE_BINARY_DIR})
@@ -91,3 +105,7 @@ include_directories(${CMAKE_BINARY_DIR})
 add_executable(simple_mmd_renderer main.cpp)
 add_dependencies(simple_mmd_renderer shader_header)
 target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui imguizmo mmd sokol stb nfd)
+add_custom_command(
+    TARGET simple_mmd_renderer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ARGS "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets"
+)

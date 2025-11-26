@@ -21,7 +21,11 @@
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
+#include "shader/ibl.glsl.h"
 #include "nfd.h"
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include <iostream>
 #include <vector>
@@ -31,6 +35,7 @@
 #include <locale>
 #include <fstream>
 #include <algorithm>
+#include <cmath>
 
 // Vertex structure
 struct Vertex {
@@ -173,6 +178,21 @@ struct {
     bool animation_playing = true;  // Animation playback state
     bool sequencer_manual_control = false;  // Whether user is manually controlling sequencer
     int sequencer_last_frame = -1;  // Track last frame to detect manual changes
+    
+    // IBL (Image Based Lighting) resources
+    sg_image equirectangular_map = {0};
+    sg_image environment_cubemap = {0};
+    sg_image irradiance_map = {0};
+    sg_image prefilter_map = {0};
+    sg_sampler default_sampler = {0};
+    sg_pipeline equirect_to_cubemap_pip = {0};
+    sg_pipeline irradiance_pip = {0};
+    sg_pipeline prefilter_pip = {0};
+    sg_pipeline skybox_pip = {0};
+    sg_buffer skybox_vertex_buffer = {0};
+    sg_buffer skybox_index_buffer = {0};
+    bool ibl_initialized = false;
+    bool show_skybox = true;
 } g_state;
 
 
@@ -398,6 +418,201 @@ void UpdateDeformedVertices() {
     sg_update_buffer(g_state.vertex_buffer, sg_range{vertices.data(), vertices.size() * sizeof(Vertex)});
 }
 
+// Create skybox geometry (cube)
+void CreateSkyboxGeometry() {
+    // Cube vertices (positions only, no normals/UVs needed for skybox)
+    float skybox_vertices[] = {
+        // positions          
+        -1.0f,  1.0f, -1.0f,
+        -1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f, -1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+
+        -1.0f, -1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f,
+        -1.0f, -1.0f,  1.0f,
+
+        -1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f, -1.0f,
+         1.0f,  1.0f,  1.0f,
+         1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f,  1.0f,
+        -1.0f,  1.0f, -1.0f,
+
+        -1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f, -1.0f,
+         1.0f, -1.0f, -1.0f,
+        -1.0f, -1.0f,  1.0f,
+         1.0f, -1.0f,  1.0f
+    };
+    
+    sg_buffer_desc vbuf_desc = {};
+    vbuf_desc.size = sizeof(skybox_vertices);
+    vbuf_desc.data.ptr = skybox_vertices;
+    vbuf_desc.data.size = sizeof(skybox_vertices);
+    vbuf_desc.label = "skybox-vertices";
+    g_state.skybox_vertex_buffer = sg_make_buffer(&vbuf_desc);
+    
+    // Skybox uses triangle list, no index buffer needed
+    g_state.skybox_index_buffer = {0};
+}
+
+// Helper function to convert equirectangular UV to direction vector
+HMM_Vec3 EquirectUVToDir(float u, float v) {
+    float theta = u * 2.0f * 3.14159265359f;
+    float phi = v * 3.14159265359f;
+    float sinPhi = sinf(phi);
+    return HMM_Vec3{
+        cosf(theta) * sinPhi,
+        cosf(phi),
+        sinf(theta) * sinPhi
+    };
+}
+
+// Load HDR image and convert to cubemap (CPU-side conversion)
+bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
+    int width, height, nrComponents;
+    float* hdr_data = stbi_loadf(hdr_path.c_str(), &width, &height, &nrComponents, 0);
+    if (!hdr_data) {
+        std::cerr << "Failed to load HDR image: " << hdr_path << std::endl;
+        return false;
+    }
+    
+    std::cout << "Loaded HDR image: " << width << "x" << height << std::endl;
+    
+    // Create equirectangular texture (for reference, but we'll convert to cubemap)
+    sg_image_desc equirect_desc = {};
+    equirect_desc.type = SG_IMAGETYPE_2D;
+    equirect_desc.width = width;
+    equirect_desc.height = height;
+    equirect_desc.num_mipmaps = 1;
+    equirect_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    equirect_desc.usage.immutable = true;
+    equirect_desc.label = "equirectangular-hdr";
+    
+    // Convert to RGBA if needed
+    std::vector<float> rgba_data;
+    if (nrComponents == 3) {
+        rgba_data.resize(width * height * 4);
+        for (int i = 0; i < width * height; ++i) {
+            rgba_data[i * 4 + 0] = hdr_data[i * 3 + 0];
+            rgba_data[i * 4 + 1] = hdr_data[i * 3 + 1];
+            rgba_data[i * 4 + 2] = hdr_data[i * 3 + 2];
+            rgba_data[i * 4 + 3] = 1.0f;
+        }
+    } else {
+        rgba_data.assign(hdr_data, hdr_data + width * height * 4);
+    }
+    
+    equirect_desc.data.mip_levels[0].ptr = rgba_data.data();
+    equirect_desc.data.mip_levels[0].size = width * height * 4 * sizeof(float);
+    g_state.equirectangular_map = sg_make_image(&equirect_desc);
+    
+    // Convert equirectangular to cubemap on CPU
+    const int cubemap_size = 512;
+    std::vector<std::vector<float>> cubemap_faces(6);
+    
+    // Cubemap face directions
+    HMM_Vec3 face_dirs[6][3] = {
+        {{1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // +X
+        {{-1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}},  // -X
+        {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},     // +Y
+        {{0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f}},   // -Y
+        {{0.0f, 0.0f, 1.0f}, {0.0f, -1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}},   // +Z
+        {{0.0f, 0.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}    // -Z
+    };
+    
+    for (int face = 0; face < 6; ++face) {
+        cubemap_faces[face].resize(cubemap_size * cubemap_size * 4);
+        
+        for (int y = 0; y < cubemap_size; ++y) {
+            for (int x = 0; x < cubemap_size; ++x) {
+                // Convert cubemap UV to direction
+                float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
+                float v = 1.0f - (y + 0.5f) / cubemap_size * 2.0f;
+                
+                HMM_Vec3 dir = HMM_Add(
+                    HMM_Add(
+                        HMM_MulV3F(face_dirs[face][0], u),
+                        HMM_MulV3F(face_dirs[face][1], v)
+                    ),
+                    face_dirs[face][2]
+                );
+                dir = HMM_NormV3(dir);
+                
+                // Convert direction to equirectangular UV
+                float theta = atan2f(dir.Z, dir.X);
+                float phi = acosf(dir.Y);
+                float equirect_u = (theta / (2.0f * 3.14159265359f)) + 0.5f;
+                float equirect_v = phi / 3.14159265359f;
+                
+                // Sample from equirectangular map
+                int src_x = (int)(equirect_u * width) % width;
+                int src_y = (int)(equirect_v * height) % height;
+                int src_idx = (src_y * width + src_x) * 4;
+                
+                int dst_idx = (y * cubemap_size + x) * 4;
+                cubemap_faces[face][dst_idx + 0] = rgba_data[src_idx + 0];
+                cubemap_faces[face][dst_idx + 1] = rgba_data[src_idx + 1];
+                cubemap_faces[face][dst_idx + 2] = rgba_data[src_idx + 2];
+                cubemap_faces[face][dst_idx + 3] = rgba_data[src_idx + 3];
+            }
+        }
+    }
+    
+    // Create cubemap texture
+    // For cubemap, all 6 faces are packed into a single mip level
+    // The data should be: face0, face1, face2, face3, face4, face5
+    std::vector<float> cubemap_packed;
+    cubemap_packed.reserve(cubemap_size * cubemap_size * 4 * 6);
+    for (int i = 0; i < 6; ++i) {
+        cubemap_packed.insert(cubemap_packed.end(), cubemap_faces[i].begin(), cubemap_faces[i].end());
+    }
+    
+    sg_image_desc cubemap_desc = {};
+    cubemap_desc.type = SG_IMAGETYPE_CUBE;
+    cubemap_desc.width = cubemap_size;
+    cubemap_desc.height = cubemap_size;
+    cubemap_desc.num_slices = 6;
+    cubemap_desc.num_mipmaps = 1;
+    cubemap_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    cubemap_desc.usage.immutable = true;
+    cubemap_desc.label = "environment-cubemap";
+    cubemap_desc.data.mip_levels[0].ptr = cubemap_packed.data();
+    cubemap_desc.data.mip_levels[0].size = cubemap_size * cubemap_size * 4 * sizeof(float) * 6;
+    g_state.environment_cubemap = sg_make_image(&cubemap_desc);
+    
+    // For now, use environment cubemap as irradiance and prefilter maps
+    // (Full prefilter implementation would require additional passes)
+    g_state.irradiance_map = g_state.environment_cubemap;
+    g_state.prefilter_map = g_state.environment_cubemap;
+    
+    stbi_image_free(hdr_data);
+    
+    std::cout << "Created environment cubemap from HDR" << std::endl;
+    return true;
+}
+
 // ImGuizmo helper functions following official demo pattern
 void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     // Identity matrix for DrawGrid (column-major)
@@ -542,6 +757,40 @@ void init(void) {
     // Initialize time
     stm_setup();
     
+    // Create skybox geometry
+    CreateSkyboxGeometry();
+    
+    // Create default sampler for IBL
+    sg_sampler_desc sampler_desc = {};
+    sampler_desc.min_filter = SG_FILTER_LINEAR;
+    sampler_desc.mag_filter = SG_FILTER_LINEAR;
+    sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
+    sampler_desc.label = "default-ibl-sampler";
+    g_state.default_sampler = sg_make_sampler(&sampler_desc);
+    
+    // Create skybox shader and pipeline
+    sg_shader skybox_shd = sg_make_shader(ibl_skybox_shader_desc(sg_query_backend()));
+    sg_pipeline_desc skybox_pip_desc = {};
+    skybox_pip_desc.shader = skybox_shd;
+    skybox_pip_desc.layout.attrs[ATTR_ibl_skybox_position].format = SG_VERTEXFORMAT_FLOAT3;
+    skybox_pip_desc.depth.write_enabled = false;
+    skybox_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    skybox_pip_desc.cull_mode = SG_CULLMODE_FRONT;
+    skybox_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    skybox_pip_desc.label = "skybox-pipeline";
+    g_state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
+    
+    // Load HDR and create cubemap
+    std::string hdr_path = "assets/hdr/piazza_bologni_1k.hdr";
+    if (LoadHDRAndCreateCubemap(hdr_path)) {
+        g_state.ibl_initialized = true;
+        std::cout << "IBL initialized successfully" << std::endl;
+    } else {
+        std::cerr << "Failed to initialize IBL" << std::endl;
+    }
+    
     // Try to load model and motion files if they exist
     if (!g_state.model_filename.empty()) {
         LoadPMXModel(g_state.model_filename);
@@ -633,6 +882,10 @@ void frame(void) {
         }
         if (ImGui::BeginMenu("Camera")) {
             ImGui::MenuItem("Camera Controls", nullptr, &g_state.camera_window_open);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("IBL")) {
+            ImGui::MenuItem("Show Skybox", nullptr, &g_state.show_skybox);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Tools")) {
@@ -926,6 +1179,40 @@ void frame(void) {
 
     sg_begin_pass(&_sg_pass);
 
+    // Draw skybox first (before model, but with depth test)
+    if (g_state.ibl_initialized && g_state.show_skybox && g_state.environment_cubemap.id != 0 && g_state.skybox_vertex_buffer.id != 0) {
+        // Remove translation from view matrix for skybox
+        HMM_Mat4 view_no_translation = view;
+        view_no_translation.Elements[3][0] = 0.0f;
+        view_no_translation.Elements[3][1] = 0.0f;
+        view_no_translation.Elements[3][2] = 0.0f;
+        
+        HMM_Mat4 skybox_mvp = proj * view_no_translation;
+        
+        ibl_vs_params_t skybox_params;
+        skybox_params.mvp = skybox_mvp;
+        
+        sg_apply_pipeline(g_state.skybox_pip);
+        
+        // Create view for cubemap
+        sg_view_desc _cubemap_sg_view_desc = {};
+        _cubemap_sg_view_desc.texture.image = g_state.environment_cubemap;
+        sg_view cubemap_view = sg_make_view(&_cubemap_sg_view_desc);
+        
+        sg_bindings skybox_bind = {};
+        skybox_bind.vertex_buffers[0] = g_state.skybox_vertex_buffer;
+        // Note: Slot names will be generated by sokol-shdc, adjust after compilation if needed
+        // Typical names: VIEW_ibl_environment_map for texture, SMP_ibl_environment_smp for sampler
+        skybox_bind.views[VIEW_ibl_environment_map] = cubemap_view;
+        skybox_bind.samplers[SMP_ibl_environment_smp] = g_state.default_sampler;
+        sg_apply_bindings(&skybox_bind);
+        sg_apply_uniforms(UB_ibl_vs_params, SG_RANGE(skybox_params));
+        
+        sg_draw(0, 36, 1);
+
+        sg_destroy_view(cubemap_view);
+    }
+    
     // Model mode: draw loaded model
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
@@ -1064,6 +1351,24 @@ void cleanup(void) {
     }
     if (g_state.index_buffer.id != 0) {
         sg_destroy_buffer(g_state.index_buffer);
+    }
+    if (g_state.skybox_vertex_buffer.id != 0) {
+        sg_destroy_buffer(g_state.skybox_vertex_buffer);
+    }
+    if (g_state.equirectangular_map.id != 0) {
+        sg_destroy_image(g_state.equirectangular_map);
+    }
+    if (g_state.environment_cubemap.id != 0) {
+        sg_destroy_image(g_state.environment_cubemap);
+    }
+    if (g_state.irradiance_map.id != 0 && g_state.irradiance_map.id != g_state.environment_cubemap.id) {
+        sg_destroy_image(g_state.irradiance_map);
+    }
+    if (g_state.prefilter_map.id != 0 && g_state.prefilter_map.id != g_state.environment_cubemap.id) {
+        sg_destroy_image(g_state.prefilter_map);
+    }
+    if (g_state.default_sampler.id != 0) {
+        sg_destroy_sampler(g_state.default_sampler);
     }
     sgimgui_discard(&g_state.sgimgui);
     simgui_shutdown();
