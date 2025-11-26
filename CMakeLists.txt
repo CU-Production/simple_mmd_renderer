@@ -3,6 +3,8 @@ project(simple_mmd_renderer)
 
 set(CMAKE_CXX_STANDARD 20)
 
+add_subdirectory(3rd_party)
+
 # Set UTF-8 encoding support
 if(MSVC)
     add_compile_options(/utf-8)
@@ -10,14 +12,6 @@ if(MSVC)
 else()
     add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
-
-# Include third-party library headers
-include_directories(
-    ${CMAKE_SOURCE_DIR}/3rd_party/sokol
-    ${CMAKE_SOURCE_DIR}/3rd_party/libmmd/include
-    ${CMAKE_SOURCE_DIR}/3rd_party/HandmadeMath
-)
-
 
 # Windows-specific settings
 if(WIN32)
@@ -96,3 +90,4 @@ include_directories(${CMAKE_BINARY_DIR})
 
 add_executable(simple_mmd_renderer main.cpp)
 add_dependencies(simple_mmd_renderer shader_header)
+target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui mmd sokol stb)
