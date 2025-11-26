@@ -67,6 +67,7 @@ struct {
     
     // Camera control state
     bool camera_rotating = false;
+    bool camera_panning = false;
     float last_mouse_x = 0.0f;
     float last_mouse_y = 0.0f;
     bool camera_window_open = false;
@@ -376,6 +377,7 @@ void frame(void) {
             ImGui::Separator();
             ImGui::Text("Controls:");
             ImGui::BulletText("Left Mouse Button: Rotate camera");
+            ImGui::BulletText("Middle Mouse Button: Pan camera");
             ImGui::BulletText("Mouse Wheel: Zoom in/out");
             ImGui::BulletText("WASD: Move camera");
             ImGui::BulletText("R: Reset camera");
@@ -546,22 +548,29 @@ void input(const sapp_event* ev) {
     
     // Only handle our own events if ImGui doesn't want them
     if (!imgui_wants_input) {
-        // Mouse events for camera rotation
+        // Mouse events for camera rotation and panning
         if (ev->type == SAPP_EVENTTYPE_MOUSE_DOWN) {
             if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
                 g_state.camera_rotating = true;
+                g_state.last_mouse_x = ev->mouse_x;
+                g_state.last_mouse_y = ev->mouse_y;
+            } else if (ev->mouse_button == SAPP_MOUSEBUTTON_MIDDLE) {
+                g_state.camera_panning = true;
                 g_state.last_mouse_x = ev->mouse_x;
                 g_state.last_mouse_y = ev->mouse_y;
             }
         } else if (ev->type == SAPP_EVENTTYPE_MOUSE_UP) {
             if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
                 g_state.camera_rotating = false;
+            } else if (ev->mouse_button == SAPP_MOUSEBUTTON_MIDDLE) {
+                g_state.camera_panning = false;
             }
         } else if (ev->type == SAPP_EVENTTYPE_MOUSE_MOVE) {
+            float dx = ev->mouse_x - g_state.last_mouse_x;
+            float dy = ev->mouse_y - g_state.last_mouse_y;
+            
             if (g_state.camera_rotating) {
-                float dx = ev->mouse_x - g_state.last_mouse_x;
-                float dy = ev->mouse_y - g_state.last_mouse_y;
-                
+                // Rotate camera around target
                 const float rotation_speed = 0.005f;
                 g_state.camera_rotation_x += dx * rotation_speed;
                 g_state.camera_rotation_y -= dy * rotation_speed;
@@ -574,10 +583,41 @@ void input(const sapp_event* ev) {
                 if (g_state.camera_rotation_y < -max_angle) {
                     g_state.camera_rotation_y = -max_angle;
                 }
+            } else if (g_state.camera_panning) {
+                // Pan camera (move target based on camera's right and up vectors)
+                // Calculate camera orientation
+                float cos_y = cosf(g_state.camera_rotation_y);
+                float sin_y = sinf(g_state.camera_rotation_y);
+                float cos_x = cosf(g_state.camera_rotation_x);
+                float sin_x = sinf(g_state.camera_rotation_x);
                 
-                g_state.last_mouse_x = ev->mouse_x;
-                g_state.last_mouse_y = ev->mouse_y;
+                // Right vector (camera's right direction)
+                HMM_Vec3 right;
+                right.X = cos_x;
+                right.Y = 0.0f;
+                right.Z = -sin_x;
+                
+                // Up vector (camera's up direction, considering pitch)
+                HMM_Vec3 up;
+                up.X = -sin_y * sin_x;
+                up.Y = cos_y;
+                up.Z = -sin_y * cos_x;
+                
+                // Pan speed based on camera distance (closer = slower pan)
+                const float pan_speed = 0.01f;
+                float pan_factor = pan_speed * g_state.camera_distance;
+                
+                // Calculate pan movement
+                HMM_Vec3 pan_move = HMM_Vec3{0.0f, 0.0f, 0.0f};
+                pan_move = HMM_Add(pan_move, HMM_MulV3F(right, -dx * pan_factor));
+                pan_move = HMM_Add(pan_move, HMM_MulV3F(up, dy * pan_factor));
+                
+                // Apply pan to camera target
+                g_state.camera_target = HMM_Add(g_state.camera_target, pan_move);
             }
+            
+            g_state.last_mouse_x = ev->mouse_x;
+            g_state.last_mouse_y = ev->mouse_y;
         } else if (ev->type == SAPP_EVENTTYPE_MOUSE_SCROLL) {
             // Zoom with mouse wheel
             const float zoom_speed = 2.0f;
