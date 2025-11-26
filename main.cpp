@@ -165,6 +165,9 @@ struct {
     int sequencer_selected_entry = -1;
     int sequencer_first_frame = 0;
     std::unique_ptr<MotionSequencer> sequencer;
+    bool animation_playing = true;  // Animation playback state
+    bool sequencer_manual_control = false;  // Whether user is manually controlling sequencer
+    int sequencer_last_frame = -1;  // Track last frame to detect manual changes
 } g_state;
 
 
@@ -457,7 +460,6 @@ void init(void) {
 // Frame update function
 void frame(void) {
     const float dt = sapp_frame_duration();
-    g_state.time += dt;
     
     int width = sapp_width();
     int height = sapp_height();
@@ -577,9 +579,33 @@ void frame(void) {
     // Draw sokol-gfx debug windows
     sgimgui_draw(&g_state.sgimgui);
     
-    // Update sequencer current frame from animation time
+    // Update animation time (only if playing and not manually controlled by sequencer)
+    if (g_state.animation_playing && !g_state.sequencer_manual_control) {
+        g_state.time += dt;
+    }
+    
+    // Update sequencer current frame from animation time (sync sequencer with animation)
+    // This happens BEFORE sequencer window is drawn, so sequencer can detect manual changes
     if (g_state.motion_loaded && g_state.motion_player) {
-        g_state.sequencer_current_frame = static_cast<int>(g_state.time * 30.0f);
+        int current_frame_from_time = static_cast<int>(g_state.time * 30.0f);
+        
+        // Initialize sequencer_last_frame if not set (first time sequencer is used)
+        if (g_state.sequencer_last_frame < 0) {
+            g_state.sequencer_last_frame = current_frame_from_time;
+            g_state.sequencer_current_frame = current_frame_from_time;
+        }
+        
+        // Only update sequencer frame if animation is playing and not manually controlled
+        if (g_state.animation_playing && !g_state.sequencer_manual_control) {
+            g_state.sequencer_current_frame = current_frame_from_time;
+            // Update last_frame to match, so we don't detect this as a manual change
+            g_state.sequencer_last_frame = g_state.sequencer_current_frame;
+        }
+        
+        // Reset manual control flag if sequencer is disabled
+        if (!g_state.sequencer_enabled) {
+            g_state.sequencer_manual_control = false;
+        }
     }
     
     // Update animation and deformed vertices
@@ -780,7 +806,39 @@ void frame(void) {
     // Draw Sequencer window if enabled
     if (g_state.sequencer_enabled && g_state.motion_loaded && g_state.sequencer) {
         if (ImGui::Begin("Animation Sequencer", &g_state.sequencer_enabled)) {
+            // Playback controls
+            bool play_button_clicked = ImGui::Button(g_state.animation_playing ? "Pause" : "Play");
+            if (play_button_clicked) {
+                g_state.animation_playing = !g_state.animation_playing;
+                // Always release manual control when toggling play state
+                g_state.sequencer_manual_control = false;
+                if (g_state.animation_playing) {
+                    // Resume playback - sync sequencer frame with current time
+                    g_state.sequencer_current_frame = static_cast<int>(g_state.time * 30.0f);
+                    g_state.sequencer_last_frame = g_state.sequencer_current_frame;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Stop")) {
+                g_state.animation_playing = false;
+                g_state.time = 0.0f;
+                g_state.sequencer_current_frame = 0;
+                g_state.sequencer_manual_control = false;
+                g_state.sequencer_last_frame = 0;
+            }
+            ImGui::SameLine();
+            ImGui::Text("Frame: %d / %d", g_state.sequencer_current_frame, g_state.sequencer ? g_state.sequencer->GetFrameMax() : 0);
+            ImGui::SameLine();
+            ImGui::Text("Time: %.2fs", g_state.time);
+            
+            ImGui::Separator();
+            
             // Draw sequencer timeline
+            // Store frame before sequencer call to detect manual changes
+            int previous_frame = g_state.sequencer_current_frame;
+            bool was_playing = g_state.animation_playing;
+            
+            // Call sequencer - this may modify sequencer_current_frame if user drags
             ImSequencer::Sequencer(
                 g_state.sequencer.get(),
                 &g_state.sequencer_current_frame,
@@ -790,9 +848,25 @@ void frame(void) {
                 ImSequencer::SEQUENCER_CHANGE_FRAME
             );
             
-            // Update animation time if frame changed by sequencer
-            if (g_state.sequencer_current_frame >= 0) {
-                g_state.time = g_state.sequencer_current_frame / 30.0f;
+            // Check if user manually dragged the frame marker in sequencer
+            // ImSequencer modifies currentFrame when user drags in the top timeline area
+            if (previous_frame != g_state.sequencer_current_frame) {
+                // Frame changed - check if it's a manual change (different from what we set)
+                int expected_frame = static_cast<int>(g_state.time * 30.0f);
+                if (abs(g_state.sequencer_current_frame - expected_frame) > 1) {
+                    // Frame is significantly different from expected - this is a manual drag
+                    g_state.time = g_state.sequencer_current_frame / 30.0f;
+                    g_state.sequencer_last_frame = g_state.sequencer_current_frame;
+                    
+                    // If was playing, pause it
+                    if (was_playing) {
+                        g_state.animation_playing = false;
+                        g_state.sequencer_manual_control = true;
+                    }
+                } else {
+                    // Small difference, might be rounding - update last_frame to match
+                    g_state.sequencer_last_frame = g_state.sequencer_current_frame;
+                }
             }
             
             ImGui::End();
