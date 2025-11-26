@@ -68,6 +68,8 @@ set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/main.glsl)
 set(SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/main.glsl.h)
 set(IBL_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/ibl.glsl)
 set(IBL_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/ibl.glsl.h)
+set(SHADOW_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/shadow.glsl)
+set(SHADOW_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/shadow.glsl.h)
 
 # Create shader output directory
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/shader)
@@ -96,8 +98,20 @@ add_custom_command(
     VERBATIM
 )
 
+# Add custom command to compile shadow shader
+add_custom_command(
+    OUTPUT ${SHADOW_SHADER_HEADER}
+    COMMAND ${SOKOL_SHDC_COMMAND}
+        --input ${SHADOW_SHADER_SRC}
+        --output ${SHADOW_SHADER_HEADER}
+        --slang ${SHADER_LANG}
+    DEPENDS ${SHADOW_SHADER_SRC}
+    COMMENT "Compiling shader ${SHADOW_SHADER_SRC} -> ${SHADOW_SHADER_HEADER}"
+    VERBATIM
+)
+
 # Create shader header file target
-add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${IBL_SHADER_HEADER})
+add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${IBL_SHADER_HEADER} ${SHADOW_SHADER_HEADER})
 
 # Include generated shader header file directory
 include_directories(${CMAKE_BINARY_DIR})

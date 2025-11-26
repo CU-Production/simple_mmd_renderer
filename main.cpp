@@ -23,6 +23,7 @@
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
 #include "shader/ibl.glsl.h"
+#include "shader/shadow.glsl.h"
 #include "nfd.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -208,6 +209,26 @@ struct {
     std::vector<sg_view> material_texture_views; // Persistent views for material textures
     sg_image default_texture = {0}; // White 1x1 texture for materials without texture
     sg_view default_texture_view = {0}; // Persistent view for default texture
+    
+    // Shadow mapping resources
+    sg_image shadow_map = {0}; // Depth texture for shadow mapping
+    sg_view shadow_map_view = {0}; // Persistent view for shadow map
+    sg_sampler shadow_sampler = {0}; // Sampler for shadow map (with comparison)
+    sg_pipeline shadow_pip = {0}; // Pipeline for shadow pass (depth-only)
+    const int shadow_map_size = 2048; // Shadow map resolution
+    
+    // Ground plane (stage)
+    sg_buffer ground_vertex_buffer = {0};
+    sg_buffer ground_index_buffer = {0};
+    sg_pipeline ground_pip = {0};
+    
+    // Directional light (sun/sky light)
+    // Default: light from top-right-front, pointing downward (normalized)
+    HMM_Vec3 light_direction = HMM_NormV3(HMM_Vec3{0.3f, -1.0f, 0.2f}); // Normalized direction (light from above, slightly from front-right)
+    HMM_Vec3 light_color = {1.0f, 1.0f, 1.0f}; // White light
+    float light_intensity = 1.0f;
+    bool shadows_enabled = true;
+    bool light_window_open = false;
 } g_state;
 
 
@@ -813,6 +834,90 @@ void UpdateDeformedVertices() {
     sg_update_buffer(g_state.vertex_buffer, sg_range{vertices.data(), vertices.size() * sizeof(Vertex)});
 }
 
+// Create ground plane geometry (white stage)
+void CreateGroundGeometry() {
+    // Large ground plane (100x100 units)
+    const float size = 50.0f;
+    Vertex ground_vertices[] = {
+        // Position          Normal            UV
+        {{-size, 0.0f, -size}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
+        {{ size, 0.0f, -size}, {0.0f, 1.0f, 0.0f}, {1.0f, 0.0f}},
+        {{ size, 0.0f,  size}, {0.0f, 1.0f, 0.0f}, {1.0f, 1.0f}},
+        {{-size, 0.0f,  size}, {0.0f, 1.0f, 0.0f}, {0.0f, 1.0f}}
+    };
+    
+    uint32_t ground_indices[] = {
+        0, 1, 2,
+        2, 3, 0
+    };
+    
+    sg_buffer_desc vbuf_desc = {};
+    vbuf_desc.size = sizeof(ground_vertices);
+    vbuf_desc.data.ptr = ground_vertices;
+    vbuf_desc.data.size = sizeof(ground_vertices);
+    vbuf_desc.label = "ground-vertices";
+    g_state.ground_vertex_buffer = sg_make_buffer(&vbuf_desc);
+    
+    sg_buffer_desc ibuf_desc = {};
+    ibuf_desc.usage.index_buffer = true;
+    ibuf_desc.data.ptr = ground_indices;
+    ibuf_desc.data.size = sizeof(ground_indices);
+    ibuf_desc.label = "ground-indices";
+    g_state.ground_index_buffer = sg_make_buffer(&ibuf_desc);
+}
+
+// Initialize shadow mapping resources
+void InitializeShadowMapping() {
+    // Create shadow map (depth texture)
+    sg_image_desc shadow_desc = {};
+    shadow_desc.type = SG_IMAGETYPE_2D;
+    shadow_desc.width = g_state.shadow_map_size;
+    shadow_desc.height = g_state.shadow_map_size;
+    shadow_desc.num_mipmaps = 1;
+    shadow_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
+    shadow_desc.usage.immutable = false;
+    shadow_desc.usage.depth_stencil_attachment = true;
+    shadow_desc.label = "shadow-map";
+    g_state.shadow_map = sg_make_image(&shadow_desc);
+    
+    // Create persistent view for shadow map
+    sg_view_desc shadow_view_desc = {};
+    shadow_view_desc.texture.image = g_state.shadow_map;
+    g_state.shadow_map_view = sg_make_view(&shadow_view_desc);
+    
+    // Create shadow sampler (regular sampler, not comparison sampler)
+    // We do manual depth comparison in the shader using texture() function
+    sg_sampler_desc shadow_sampler_desc = {};
+    shadow_sampler_desc.min_filter = SG_FILTER_LINEAR;
+    shadow_sampler_desc.mag_filter = SG_FILTER_LINEAR;
+    shadow_sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_BORDER;
+    shadow_sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_BORDER;
+    shadow_sampler_desc.wrap_w = SG_WRAP_CLAMP_TO_BORDER;
+    shadow_sampler_desc.border_color = SG_BORDERCOLOR_OPAQUE_WHITE;
+    // Note: No compare function - we do manual comparison in shader
+    shadow_sampler_desc.label = "shadow-sampler";
+    g_state.shadow_sampler = sg_make_sampler(&shadow_sampler_desc);
+    
+    // Create shadow shader and pipeline
+    sg_shader shadow_shd = sg_make_shader(shadow_shadow_shader_desc(sg_query_backend()));
+    sg_pipeline_desc shadow_pip_desc = {};
+    shadow_pip_desc.shader = shadow_shd;
+    shadow_pip_desc.layout.buffers[0].stride = sizeof(Vertex);
+    shadow_pip_desc.layout.attrs[ATTR_shadow_shadow_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
+    shadow_pip_desc.depth.write_enabled = true;
+    shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    shadow_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;
+    shadow_pip_desc.cull_mode = SG_CULLMODE_BACK;
+    shadow_pip_desc.index_type = SG_INDEXTYPE_UINT32;
+    shadow_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    shadow_pip_desc.label = "shadow-pipeline";
+    // No color output for shadow pass
+    shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_NONE;
+    g_state.shadow_pip = sg_make_pipeline(&shadow_pip_desc);
+    
+    std::cout << "Initialized shadow mapping (resolution: " << g_state.shadow_map_size << "x" << g_state.shadow_map_size << ")" << std::endl;
+}
+
 // Create skybox geometry (cube)
 void CreateSkyboxGeometry() {
     // Cube vertices (positions only, no normals/UVs needed for skybox)
@@ -1126,25 +1231,16 @@ void GenerateIrradianceMap() {
         
         ibl_vs_params_t vs_params;
         vs_params.mvp = mvp;
-        // TODO: UB_ibl_vs_params will be generated by sokol-shdc in shader/ibl.glsl.h
-        // After shader compilation, uncomment and use the correct uniform block slot:
-        // sg_apply_uniforms(UB_ibl_vs_params, SG_RANGE(vs_params));
-        // For now, use slot 0 (will need to adjust after shader compilation)
-        sg_apply_uniforms(0, SG_RANGE(vs_params));
-        
+        sg_apply_uniforms(UB_ibl_vs_params, SG_RANGE(vs_params));
+
         sg_bindings bind = {};
         bind.vertex_buffers[0] = g_state.skybox_vertex_buffer;
         // Create view for environment cubemap (as texture)
         sg_view_desc env_view_desc = {};
         env_view_desc.texture.image = g_state.environment_cubemap;
         sg_view env_view = sg_make_view(&env_view_desc);
-        // TODO: These constants will be generated by sokol-shdc in shader/ibl.glsl.h
-        // After shader compilation, uncomment and use the correct slot indices:
-        // bind.views[VIEW_ibl_irradiance_environment_map] = env_view;
-        // bind.samplers[SMP_ibl_irradiance_environment_smp] = g_state.default_sampler;
-        // For now, use slot 0 (will need to adjust after shader compilation)
-        bind.views[0] = env_view;
-        bind.samplers[0] = g_state.default_sampler;
+        bind.views[VIEW_ibl_equirectangular_map] = env_view;
+        bind.samplers[SMP_ibl_equirectangular_smp] = g_state.default_sampler;
         sg_apply_bindings(&bind);
         sg_destroy_view(env_view);
         
@@ -1431,6 +1527,27 @@ void init(void) {
     // Create skybox geometry
     CreateSkyboxGeometry();
     
+    // Create ground geometry
+    CreateGroundGeometry();
+    
+    // Initialize shadow mapping
+    InitializeShadowMapping();
+    
+    // Create ground pipeline (reuses main shader)
+    sg_pipeline_desc ground_pip_desc = {};
+    ground_pip_desc.shader = shd; // Reuse main shader
+    ground_pip_desc.layout.buffers[0].stride = sizeof(Vertex);
+    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
+    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_normal] = { .offset = sizeof(float) * 3, .format = SG_VERTEXFORMAT_FLOAT3 };
+    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
+    ground_pip_desc.depth.write_enabled = true;
+    ground_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    ground_pip_desc.cull_mode = SG_CULLMODE_BACK;
+    ground_pip_desc.index_type = SG_INDEXTYPE_UINT32;
+    ground_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    ground_pip_desc.label = "ground-pipeline";
+    g_state.ground_pip = sg_make_pipeline(&ground_pip_desc);
+    
     // Create default sampler for IBL and textures
     sg_sampler_desc sampler_desc = {};
     sampler_desc.min_filter = SG_FILTER_LINEAR;
@@ -1587,6 +1704,10 @@ void frame(void) {
             ImGui::MenuItem("Show Skybox", nullptr, &g_state.show_skybox);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Light")) {
+            ImGui::MenuItem("Light Controls", nullptr, &g_state.light_window_open);
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Tools")) {
             ImGui::MenuItem("Model Transform (ImGuizmo)", nullptr, &g_state.guizmo_enabled);
             ImGui::MenuItem("Animation Sequencer", nullptr, &g_state.sequencer_enabled);
@@ -1631,6 +1752,46 @@ void frame(void) {
                 g_state.camera_rotation_x = 0.0f;
                 g_state.camera_rotation_y = 0.0f;
             }
+        }
+        ImGui::End();
+    }
+    
+    // Draw light debug window
+    if (g_state.light_window_open) {
+        if (ImGui::Begin("Light Controls", &g_state.light_window_open)) {
+            ImGui::Text("Directional Light (Sun/Sky Light)");
+            ImGui::Separator();
+            
+            // Light direction (normalized)
+            float light_dir[3] = {g_state.light_direction.X, g_state.light_direction.Y, g_state.light_direction.Z};
+            if (ImGui::DragFloat3("Direction", light_dir, 0.01f, -1.0f, 1.0f)) {
+                g_state.light_direction = HMM_Vec3{light_dir[0], light_dir[1], light_dir[2]};
+                // Normalize direction
+                float len = HMM_LenV3(g_state.light_direction);
+                if (len > 0.001f) {
+                    g_state.light_direction = HMM_DivV3F(g_state.light_direction, len);
+                }
+            }
+            
+            // Light color
+            float light_col[3] = {g_state.light_color.X, g_state.light_color.Y, g_state.light_color.Z};
+            if (ImGui::ColorEdit3("Color", light_col)) {
+                g_state.light_color = HMM_Vec3{light_col[0], light_col[1], light_col[2]};
+            }
+            
+            // Light intensity
+            ImGui::DragFloat("Intensity", &g_state.light_intensity, 0.1f, 0.0f, 10.0f);
+            
+            ImGui::Separator();
+            ImGui::Checkbox("Enable Shadows", &g_state.shadows_enabled);
+            
+            ImGui::Separator();
+            ImGui::Text("Light Info:");
+            ImGui::Text("Direction: (%.3f, %.3f, %.3f)", 
+                g_state.light_direction.X, g_state.light_direction.Y, g_state.light_direction.Z);
+            ImGui::Text("Color: (%.3f, %.3f, %.3f)", 
+                g_state.light_color.X, g_state.light_color.Y, g_state.light_color.Z);
+            ImGui::Text("Intensity: %.2f", g_state.light_intensity);
         }
         ImGui::End();
     }
@@ -1866,12 +2027,128 @@ void frame(void) {
         model_mat = HMM_TransposeM4(model_mat);
     }
     HMM_Mat4 mvp = proj * view * model_mat;
-
-    // Prepare uniform data
-    mmd_vs_params_t params;
-    params.mvp = mvp;
     
-    // Begin rendering
+    // Calculate light space MVP for shadow mapping
+    // For directional light, we need to create a view matrix looking along the light direction
+    // Light direction points from light source to scene (so we negate it for view direction)
+    HMM_Vec3 light_dir = g_state.light_direction;
+    
+    // Ensure light direction is normalized
+    float light_len = HMM_LenV3(light_dir);
+    if (light_len > 0.001f) {
+        light_dir = HMM_DivV3F(light_dir, light_len);
+    } else {
+        // Fallback to default direction if invalid
+        light_dir = HMM_NormV3(HMM_Vec3{0.0f, -1.0f, 0.0f});
+    }
+    
+    // Calculate up vector perpendicular to light direction
+    // Use world up (0,1,0) as reference, but adjust if light is too vertical
+    HMM_Vec3 world_up = HMM_Vec3{0.0f, 1.0f, 0.0f};
+    HMM_Vec3 right = HMM_Cross(light_dir, world_up);
+    float right_len = HMM_LenV3(right);
+    
+    // If light direction is too close to world up, use a different reference
+    if (right_len < 0.001f) {
+        world_up = HMM_Vec3{0.0f, 0.0f, 1.0f}; // Use forward as reference instead
+        right = HMM_Cross(light_dir, world_up);
+        right_len = HMM_LenV3(right);
+    }
+    
+    // Normalize right vector
+    if (right_len > 0.001f) {
+        right = HMM_DivV3F(right, right_len);
+    } else {
+        right = HMM_Vec3{1.0f, 0.0f, 0.0f}; // Fallback
+    }
+    
+    // Calculate actual up vector
+    HMM_Vec3 light_up = HMM_Cross(right, light_dir);
+    float up_len = HMM_LenV3(light_up);
+    if (up_len > 0.001f) {
+        light_up = HMM_DivV3F(light_up, up_len);
+    } else {
+        light_up = HMM_Vec3{0.0f, 1.0f, 0.0f}; // Fallback
+    }
+    
+    // Position light far away in the direction opposite to light_dir
+    // For directional light, position doesn't matter much, but we place it far away
+    HMM_Vec3 light_pos = HMM_MulV3F(light_dir, -100.0f);
+    HMM_Vec3 light_target = HMM_Vec3{0.0f, 0.0f, 0.0f}; // Look at origin
+    
+    // Use orthographic projection for directional light
+    float light_size = 50.0f; // Size of light frustum (covers 50 units in each direction)
+    HMM_Mat4 light_proj = HMM_Orthographic_RH_NO(-light_size, light_size, -light_size, light_size, 0.1f, 200.0f);
+    HMM_Mat4 light_view = HMM_LookAt_RH(light_pos, light_target, light_up);
+    HMM_Mat4 light_mvp = light_proj * light_view * model_mat;
+    
+    // Render shadow pass first (before main rendering)
+    if (g_state.shadows_enabled && g_state.shadow_map.id != 0) {
+        // Create view for shadow map as depth attachment
+        sg_view_desc shadow_depth_view_desc = {};
+        shadow_depth_view_desc.depth_stencil_attachment.image = g_state.shadow_map;
+        sg_view shadow_depth_view = sg_make_view(&shadow_depth_view_desc);
+        
+        // Create shadow pass
+        sg_pass shadow_pass = {};
+        shadow_pass.attachments.depth_stencil = shadow_depth_view;
+        shadow_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+        shadow_pass.action.depth.clear_value = 1.0f;
+        shadow_pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE; // No color output
+        
+        sg_begin_pass(&shadow_pass);
+        sg_apply_pipeline(g_state.shadow_pip);
+        
+        // Render model to shadow map
+        if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
+            shadow_vs_params_t shadow_vs_params;
+            shadow_vs_params.light_mvp = light_mvp;
+            
+            sg_bindings shadow_bind = {};
+            shadow_bind.vertex_buffers[0] = g_state.vertex_buffer;
+            shadow_bind.index_buffer = g_state.index_buffer;
+            sg_apply_bindings(&shadow_bind);
+            sg_apply_uniforms(0, SG_RANGE(shadow_vs_params));
+            
+            // Render all parts
+            size_t part_num = g_state.model->GetPartNum();
+            for (size_t part_idx = 0; part_idx < part_num; ++part_idx) {
+                const mmd::Model::Part& part = g_state.model->GetPart(part_idx);
+                const size_t base_shift = part.GetBaseShift();
+                const size_t triangle_num = part.GetTriangleNum();
+                
+                if (triangle_num == 0) continue;
+                
+                int index_offset = (int)(base_shift * 3);
+                int index_count = (int)(triangle_num * 3);
+                if (index_count > 0) {
+                    sg_draw(index_offset, index_count, 1);
+                }
+            }
+        }
+        
+        // Render ground to shadow map
+        if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
+            HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
+            HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
+            
+            shadow_vs_params_t ground_shadow_vs_params;
+            ground_shadow_vs_params.light_mvp = ground_light_mvp;
+            
+            sg_bindings ground_shadow_bind = {};
+            ground_shadow_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
+            ground_shadow_bind.index_buffer = g_state.ground_index_buffer;
+            sg_apply_bindings(&ground_shadow_bind);
+            sg_apply_uniforms(0, SG_RANGE(ground_shadow_vs_params));
+            
+            sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
+        }
+        
+        sg_end_pass();
+        sg_destroy_view(shadow_depth_view);
+    }
+
+    // Begin main rendering pass
     sg_pass _sg_pass{};
     _sg_pass.action = g_state.pass_action;
     _sg_pass.swapchain = sglue_swapchain();
@@ -1916,17 +2193,22 @@ void frame(void) {
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
         
-        // Update VS params to include model matrix
+        // Update VS params to include model matrix and light MVP
         mmd_vs_params_t vs_params;
         vs_params.mvp = mvp;
         vs_params.model = model_mat;
+        vs_params.light_mvp = light_mvp; // For shadow mapping
         
-        // FS params for IBL
+        // FS params for IBL and lighting
         mmd_fs_params_t fs_params;
         fs_params.view_pos = g_state.camera_pos;
         fs_params.roughness = 0.5f; // Default roughness
         fs_params.metallic = 0.0f;  // Default metallic
         fs_params.ibl_strength = 1.0f;
+        fs_params.light_direction = g_state.light_direction;
+        fs_params.light_color = g_state.light_color;
+        fs_params.light_intensity = g_state.light_intensity;
+        fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
         
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
@@ -1946,7 +2228,7 @@ void frame(void) {
                 ? g_state.material_texture_views[part_idx]
                 : g_state.default_texture_view;
             
-            // Bind textures: slot 0=irradiance, slot 1=prefilter, slot 2=diffuse texture
+            // Bind textures: slot 0=irradiance, slot 1=prefilter, slot 2=diffuse texture, slot 3=shadow map
             if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
                 // Use persistent views for IBL textures
                 // TODO: These constants will be generated by sokol-shdc in shader/main.glsl.h
@@ -1956,25 +2238,33 @@ void frame(void) {
                 bind.samplers[1] = g_state.default_sampler;
                 bind.views[2] = material_view;
                 bind.samplers[2] = g_state.default_sampler;
+                bind.views[3] = g_state.shadow_map_view;
+                bind.samplers[3] = g_state.shadow_sampler;
                 
                 sg_apply_bindings(&bind);
                 sg_apply_uniforms(0, SG_RANGE(vs_params));
-                sg_apply_uniforms(3, SG_RANGE(fs_params)); // fs_params is now binding 3
+                sg_apply_uniforms(4, SG_RANGE(fs_params)); // fs_params is now binding 4
             } else {
-                // No IBL, but still bind texture
+                // No IBL, but still bind texture and shadow map
                 bind.views[2] = material_view;
                 bind.samplers[2] = g_state.default_sampler;
+                bind.views[3] = g_state.shadow_map_view;
+                bind.samplers[3] = g_state.shadow_sampler;
                 
-                // Create dummy fs_params for shader (even without IBL, shader expects it)
+                // Create fs_params for shader (even without IBL, shader expects it)
                 mmd_fs_params_t fs_params_no_ibl;
                 fs_params_no_ibl.view_pos = g_state.camera_pos;
                 fs_params_no_ibl.roughness = 0.5f;
                 fs_params_no_ibl.metallic = 0.0f;
                 fs_params_no_ibl.ibl_strength = 0.0f; // Disable IBL
+                fs_params_no_ibl.light_direction = g_state.light_direction;
+                fs_params_no_ibl.light_color = g_state.light_color;
+                fs_params_no_ibl.light_intensity = g_state.light_intensity;
+                fs_params_no_ibl.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
                 
                 sg_apply_bindings(&bind);
                 sg_apply_uniforms(0, SG_RANGE(vs_params));
-                sg_apply_uniforms(3, SG_RANGE(fs_params_no_ibl));
+                sg_apply_uniforms(4, SG_RANGE(fs_params_no_ibl)); // fs_params is now binding 4
             }
             
             // Draw this part's triangles
@@ -1984,6 +2274,56 @@ void frame(void) {
                 sg_draw(index_offset, index_count, 1);
             }
         }
+    }
+    
+    // Draw ground plane (white stage)
+    if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
+        sg_apply_pipeline(g_state.ground_pip);
+        
+        HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
+        HMM_Mat4 ground_mvp = proj * view * ground_model;
+        HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
+        
+        mmd_vs_params_t ground_vs_params;
+        ground_vs_params.mvp = ground_mvp;
+        ground_vs_params.model = ground_model;
+        ground_vs_params.light_mvp = ground_light_mvp;
+        
+        mmd_fs_params_t ground_fs_params;
+        ground_fs_params.view_pos = g_state.camera_pos;
+        ground_fs_params.roughness = 0.8f; // Ground is less rough
+        ground_fs_params.metallic = 0.0f;  // Ground is not metallic
+        ground_fs_params.ibl_strength = g_state.ibl_initialized ? 1.0f : 0.0f;
+        ground_fs_params.light_direction = g_state.light_direction;
+        ground_fs_params.light_color = g_state.light_color;
+        ground_fs_params.light_intensity = g_state.light_intensity;
+        ground_fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
+        
+        sg_bindings ground_bind = {};
+        ground_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
+        ground_bind.index_buffer = g_state.ground_index_buffer;
+        
+        if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
+            ground_bind.views[0] = g_state.irradiance_map_view;
+            ground_bind.samplers[0] = g_state.default_sampler;
+            ground_bind.views[1] = g_state.prefilter_map_view;
+            ground_bind.samplers[1] = g_state.default_sampler;
+            ground_bind.views[2] = g_state.default_texture_view; // White texture for ground
+            ground_bind.samplers[2] = g_state.default_sampler;
+            ground_bind.views[3] = g_state.shadow_map_view;
+            ground_bind.samplers[3] = g_state.shadow_sampler;
+        } else {
+            ground_bind.views[2] = g_state.default_texture_view;
+            ground_bind.samplers[2] = g_state.default_sampler;
+            ground_bind.views[3] = g_state.shadow_map_view;
+            ground_bind.samplers[3] = g_state.shadow_sampler;
+        }
+        
+        sg_apply_bindings(&ground_bind);
+        sg_apply_uniforms(0, SG_RANGE(ground_vs_params));
+        sg_apply_uniforms(4, SG_RANGE(ground_fs_params));
+        
+        sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
     }
     
     // End model rendering pass
@@ -2150,6 +2490,23 @@ void cleanup(void) {
     }
     if (g_state.default_texture.id != 0) {
         sg_destroy_image(g_state.default_texture);
+    }
+    // Clean up shadow mapping resources
+    if (g_state.shadow_map_view.id != 0) {
+        sg_destroy_view(g_state.shadow_map_view);
+    }
+    if (g_state.shadow_map.id != 0) {
+        sg_destroy_image(g_state.shadow_map);
+    }
+    if (g_state.shadow_sampler.id != 0) {
+        sg_destroy_sampler(g_state.shadow_sampler);
+    }
+    // Clean up ground resources
+    if (g_state.ground_vertex_buffer.id != 0) {
+        sg_destroy_buffer(g_state.ground_vertex_buffer);
+    }
+    if (g_state.ground_index_buffer.id != 0) {
+        sg_destroy_buffer(g_state.ground_index_buffer);
     }
     sgimgui_discard(&g_state.sgimgui);
     simgui_shutdown();
