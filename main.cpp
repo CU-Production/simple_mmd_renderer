@@ -61,6 +61,16 @@ struct {
     HMM_Vec3 camera_pos = {0.0f, 10.0f, 40.0f};
     HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};
     float camera_fov = 45.0f;
+    float camera_distance = 40.0f;
+    float camera_rotation_x = 0.0f;  // Horizontal rotation (around Y axis)
+    float camera_rotation_y = 0.0f;  // Vertical rotation (around X axis)
+    
+    // Camera control state
+    bool camera_rotating = false;
+    float last_mouse_x = 0.0f;
+    float last_mouse_y = 0.0f;
+    bool camera_window_open = false;
+    bool keys_down[256] = {false};
     
     std::string model_filename;
     std::string motion_filename;
@@ -340,7 +350,46 @@ void frame(void) {
             ImGui::MenuItem("Calls", nullptr, &g_state.sgimgui.capture_window.open);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Camera")) {
+            ImGui::MenuItem("Camera Controls", nullptr, &g_state.camera_window_open);
+            ImGui::EndMenu();
+        }
         ImGui::EndMainMenuBar();
+    }
+    
+    // Draw camera debug window
+    if (g_state.camera_window_open) {
+        if (ImGui::Begin("Camera Controls", &g_state.camera_window_open)) {
+            ImGui::Text("Camera Position");
+            ImGui::DragFloat3("Position", &g_state.camera_pos.X, 0.1f);
+            
+            ImGui::Text("Camera Target");
+            ImGui::DragFloat3("Target", &g_state.camera_target.X, 0.1f);
+            
+            ImGui::Separator();
+            ImGui::Text("Camera Settings");
+            ImGui::DragFloat("FOV", &g_state.camera_fov, 1.0f, 10.0f, 120.0f);
+            ImGui::DragFloat("Distance", &g_state.camera_distance, 0.5f, 1.0f, 200.0f);
+            ImGui::DragFloat("Rotation X", &g_state.camera_rotation_x, 0.01f, -3.14f, 3.14f);
+            ImGui::DragFloat("Rotation Y", &g_state.camera_rotation_y, 0.01f, -1.57f, 1.57f);
+            
+            ImGui::Separator();
+            ImGui::Text("Controls:");
+            ImGui::BulletText("Left Mouse Button: Rotate camera");
+            ImGui::BulletText("Mouse Wheel: Zoom in/out");
+            ImGui::BulletText("WASD: Move camera");
+            ImGui::BulletText("R: Reset camera");
+            
+            if (ImGui::Button("Reset Camera")) {
+                g_state.camera_pos = HMM_Vec3{0.0f, 10.0f, 40.0f};
+                g_state.camera_target = HMM_Vec3{0.0f, 0.0f, 0.0f};
+                g_state.camera_fov = 45.0f;
+                g_state.camera_distance = 40.0f;
+                g_state.camera_rotation_x = 0.0f;
+                g_state.camera_rotation_y = 0.0f;
+            }
+        }
+        ImGui::End();
     }
     
     // Draw sokol-gfx debug windows
@@ -356,6 +405,75 @@ void frame(void) {
         g_state.poser->ResetPosing();
         g_state.poser->Deform();
     }
+    
+    // Handle continuous keyboard input for camera movement (WASD)
+    // Move camera target, camera position will be updated based on orbit
+    if (!ImGui::GetIO().WantCaptureKeyboard) {
+        const float move_speed = 50.0f;  // units per second
+        HMM_Vec3 move_dir = HMM_Vec3{0.0f, 0.0f, 0.0f};
+        
+        // Get forward and right vectors from camera view direction
+        float cos_y = cosf(g_state.camera_rotation_y);
+        float sin_y = sinf(g_state.camera_rotation_y);
+        float cos_x = cosf(g_state.camera_rotation_x);
+        float sin_x = sinf(g_state.camera_rotation_x);
+        
+        // Forward vector (camera looking direction)
+        HMM_Vec3 forward;
+        forward.X = -cos_y * sin_x;
+        forward.Y = -sin_y;
+        forward.Z = -cos_y * cos_x;
+        
+        // Right vector (perpendicular to forward and up)
+        HMM_Vec3 right;
+        right.X = cos_x;
+        right.Y = 0.0f;
+        right.Z = -sin_x;
+        
+        // Up vector
+        HMM_Vec3 up = HMM_Vec3{0.0f, 1.0f, 0.0f};
+        
+        // Check keyboard state
+        if (g_state.keys_down[SAPP_KEYCODE_W]) {
+            move_dir = HMM_Add(move_dir, forward);
+        }
+        if (g_state.keys_down[SAPP_KEYCODE_S]) {
+            move_dir = HMM_Sub(move_dir, forward);
+        }
+        if (g_state.keys_down[SAPP_KEYCODE_A]) {
+            move_dir = HMM_Sub(move_dir, right);
+        }
+        if (g_state.keys_down[SAPP_KEYCODE_D]) {
+            move_dir = HMM_Add(move_dir, right);
+        }
+        if (g_state.keys_down[SAPP_KEYCODE_Q]) {
+            move_dir = HMM_Sub(move_dir, up);
+        }
+        if (g_state.keys_down[SAPP_KEYCODE_E]) {
+            move_dir = HMM_Add(move_dir, up);
+        }
+        
+        // Apply movement to camera target
+        float move_len = HMM_LenV3(move_dir);
+        if (move_len > 0.001f) {
+            move_dir = HMM_DivV3F(move_dir, move_len);
+            HMM_Vec3 move = HMM_MulV3F(move_dir, move_speed * dt);
+            g_state.camera_target = HMM_Add(g_state.camera_target, move);
+        }
+    }
+    
+    // Update camera position based on rotation and distance (orbit camera)
+    float cos_y = cosf(g_state.camera_rotation_y);
+    float sin_y = sinf(g_state.camera_rotation_y);
+    float cos_x = cosf(g_state.camera_rotation_x);
+    float sin_x = sinf(g_state.camera_rotation_x);
+    
+    HMM_Vec3 camera_offset;
+    camera_offset.X = g_state.camera_distance * cos_y * sin_x;
+    camera_offset.Y = g_state.camera_distance * sin_y;
+    camera_offset.Z = g_state.camera_distance * cos_y * cos_x;
+    
+    g_state.camera_pos = HMM_Add(g_state.camera_target, camera_offset);
     
     // Calculate MVP matrix
     HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
@@ -428,9 +546,69 @@ void input(const sapp_event* ev) {
     
     // Only handle our own events if ImGui doesn't want them
     if (!imgui_wants_input) {
+        // Mouse events for camera rotation
+        if (ev->type == SAPP_EVENTTYPE_MOUSE_DOWN) {
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+                g_state.camera_rotating = true;
+                g_state.last_mouse_x = ev->mouse_x;
+                g_state.last_mouse_y = ev->mouse_y;
+            }
+        } else if (ev->type == SAPP_EVENTTYPE_MOUSE_UP) {
+            if (ev->mouse_button == SAPP_MOUSEBUTTON_LEFT) {
+                g_state.camera_rotating = false;
+            }
+        } else if (ev->type == SAPP_EVENTTYPE_MOUSE_MOVE) {
+            if (g_state.camera_rotating) {
+                float dx = ev->mouse_x - g_state.last_mouse_x;
+                float dy = ev->mouse_y - g_state.last_mouse_y;
+                
+                const float rotation_speed = 0.005f;
+                g_state.camera_rotation_x += dx * rotation_speed;
+                g_state.camera_rotation_y -= dy * rotation_speed;
+                
+                // Clamp vertical rotation to prevent flipping
+                const float max_angle = 1.57f;  // ~90 degrees
+                if (g_state.camera_rotation_y > max_angle) {
+                    g_state.camera_rotation_y = max_angle;
+                }
+                if (g_state.camera_rotation_y < -max_angle) {
+                    g_state.camera_rotation_y = -max_angle;
+                }
+                
+                g_state.last_mouse_x = ev->mouse_x;
+                g_state.last_mouse_y = ev->mouse_y;
+            }
+        } else if (ev->type == SAPP_EVENTTYPE_MOUSE_SCROLL) {
+            // Zoom with mouse wheel
+            const float zoom_speed = 2.0f;
+            g_state.camera_distance -= ev->scroll_y * zoom_speed;
+            if (g_state.camera_distance < 1.0f) {
+                g_state.camera_distance = 1.0f;
+            }
+            if (g_state.camera_distance > 200.0f) {
+                g_state.camera_distance = 200.0f;
+            }
+        }
+        
+        // Keyboard events
         if (ev->type == SAPP_EVENTTYPE_KEY_DOWN) {
+            if (ev->key_code < 256) {
+                g_state.keys_down[ev->key_code] = true;
+            }
             if (ev->key_code == SAPP_KEYCODE_ESCAPE) {
                 sapp_request_quit();
+            } else if (ev->key_code == SAPP_KEYCODE_R) {
+                // Reset camera
+                g_state.camera_pos = HMM_Vec3{0.0f, 10.0f, 40.0f};
+                g_state.camera_target = HMM_Vec3{0.0f, 0.0f, 0.0f};
+                g_state.camera_fov = 45.0f;
+                g_state.camera_distance = 40.0f;
+                g_state.camera_rotation_x = 0.0f;
+                g_state.camera_rotation_y = 0.0f;
+            }
+        } else if (ev->type == SAPP_EVENTTYPE_KEY_UP) {
+            if (ev->key_code < 256) {
+                g_state.keys_down[ev->key_code] = false;
             }
         }
     }
