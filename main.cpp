@@ -440,16 +440,32 @@ void frame(void) {
     // Update animation and deformed vertices
     // Ensure Deform() is called before UpdateDeformedVertices() to populate pose_image
     if (g_state.model_loaded && g_state.poser) {
+        // Reset posing first (clears all bone poses and morphs)
+        g_state.poser->ResetPosing();
+        
+        // Then apply motion if available
         if (g_state.motion_loaded && g_state.motion_player) {
             // Calculate current frame (assuming 30 FPS)
             size_t frame = static_cast<size_t>(g_state.time * 30.0f);
             
-            // Seek to current frame and apply motion
+            // Seek to current frame and apply motion (sets bone poses and morphs)
             g_state.motion_player->SeekFrame(frame);
+            
+            // After setting bone poses, we need to update bone transforms
+            // ResetPosing() already called PrePhysicsPosing() and PostPhysicsPosing(),
+            // but after SeekFrame() we need to update transforms again
+            g_state.poser->PrePhysicsPosing();
+            g_state.poser->PostPhysicsPosing();
+            
+            // Debug: print frame number every second
+            static size_t last_frame = 0;
+            if (frame != last_frame && frame % 30 == 0) {
+                std::cout << "Animation frame: " << frame << " (time: " << g_state.time << "s)" << std::endl;
+                last_frame = frame;
+            }
         }
         
-        // Apply posing and deformation (even without motion, to get initial pose)
-        g_state.poser->ResetPosing();
+        // Apply deformation (calculates deformed vertex positions)
         g_state.poser->Deform();
         
         // Update vertex buffer with deformed vertices (only once per frame)
