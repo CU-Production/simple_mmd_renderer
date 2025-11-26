@@ -10,6 +10,16 @@ add_library(imgui
         imgui/imgui_widgets.cpp)
 target_include_directories(imgui PUBLIC imgui)
 
+# ImGuizmo
+add_library(imguizmo
+        ImGuizmo/GraphEditor.cpp
+        ImGuizmo/ImCurveEdit.cpp
+        ImGuizmo/ImGradient.cpp
+        ImGuizmo/ImGuizmo.cpp
+        ImGuizmo/ImSequencer.cpp)
+target_include_directories(imguizmo PUBLIC ImGuizmo)
+target_link_libraries(imguizmo PRIVATE imgui)
+
 # libmmd
 add_library(mmd INTERFACE)
 target_include_directories(mmd INTERFACE libmmd/include)

@@ -14,6 +14,8 @@
 #include "imgui.h"
 #include "util/sokol_imgui.h"
 #include "util/sokol_gfx_imgui.h"
+#include "ImGuizmo.h"
+#include "ImSequencer.h"
 
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
@@ -34,6 +36,74 @@ struct Vertex {
     float pos[3];
     float normal[3];
     float uv[2];
+};
+
+// Sequencer interface for VMD animation
+class MotionSequencer : public ImSequencer::SequenceInterface {
+public:
+    MotionSequencer(std::shared_ptr<mmd::Motion> motion) : motion_(motion) {
+        if (motion_) {
+            // Create a simple entry representing the entire animation
+            int max_frame = static_cast<int>(motion_->GetLength());
+            if (max_frame == 0) {
+                max_frame = 10000; // Default if length is 0
+            }
+            entries_.push_back({0, max_frame, 0});
+        }
+    }
+    
+    virtual int GetFrameMin() const override {
+        return 0;
+    }
+    
+    virtual int GetFrameMax() const override {
+        if (motion_) {
+            int max_frame = static_cast<int>(motion_->GetLength());
+            return max_frame > 0 ? max_frame : 10000;
+        }
+        return 10000;
+    }
+    
+    virtual int GetItemCount() const override {
+        return static_cast<int>(entries_.size());
+    }
+    
+    virtual void Get(int index, int** start, int** end, int* type, unsigned int* color) override {
+        if (index >= 0 && index < static_cast<int>(entries_.size())) {
+            if (start) {
+                *start = &entries_[index].start;
+            }
+            if (end) {
+                *end = &entries_[index].end;
+            }
+            if (type) {
+                *type = entries_[index].type;
+            }
+            if (color) {
+                *color = 0xFFAA0000; // Red color for animation entry
+            }
+        }
+    }
+    
+    virtual const char* GetItemLabel(int index) const override {
+        if (index == 0) {
+            return "VMD Animation";
+        }
+        return "";
+    }
+    
+    virtual void DoubleClick(int index) override {
+        // Could seek to frame on double click
+    }
+    
+private:
+    std::shared_ptr<mmd::Motion> motion_;
+    struct Entry {
+        int start;
+        int end;
+        int type;
+    };
+    std::vector<Entry> entries_;
 };
 
 
@@ -76,6 +146,25 @@ struct {
     
     std::string model_filename;
     std::string motion_filename;
+    
+    // ImGuizmo model transform
+    bool guizmo_enabled = false;
+    float model_matrix[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    ImGuizmo::OPERATION guizmo_operation = ImGuizmo::TRANSLATE;
+    ImGuizmo::MODE guizmo_mode = ImGuizmo::WORLD;
+    
+    // ImSequencer animation timeline
+    bool sequencer_enabled = false;
+    int sequencer_current_frame = 0;
+    bool sequencer_expanded = true;
+    int sequencer_selected_entry = -1;
+    int sequencer_first_frame = 0;
+    std::unique_ptr<MotionSequencer> sequencer;
 } g_state;
 
 
@@ -157,6 +246,9 @@ bool LoadVMDMotion(const std::string& filename) {
         g_state.motion = std::make_shared<mmd::Motion>();
         reader.ReadMotion(*g_state.motion);
         g_state.motion_loaded = true;
+        
+        // Create sequencer for animation timeline
+        g_state.sequencer = std::make_unique<MotionSequencer>(g_state.motion);
         
         // Create motion player if both model and motion are loaded
         if (g_state.model && g_state.motion && g_state.poser) {
@@ -438,6 +530,11 @@ void frame(void) {
             ImGui::MenuItem("Camera Controls", nullptr, &g_state.camera_window_open);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Tools")) {
+            ImGui::MenuItem("Model Transform (ImGuizmo)", nullptr, &g_state.guizmo_enabled);
+            ImGui::MenuItem("Animation Sequencer", nullptr, &g_state.sequencer_enabled);
+            ImGui::EndMenu();
+        }
         ImGui::EndMainMenuBar();
     }
     
@@ -479,6 +576,11 @@ void frame(void) {
     
     // Draw sokol-gfx debug windows
     sgimgui_draw(&g_state.sgimgui);
+    
+    // Update sequencer current frame from animation time
+    if (g_state.motion_loaded && g_state.motion_player) {
+        g_state.sequencer_current_frame = static_cast<int>(g_state.time * 30.0f);
+    }
     
     // Update animation and deformed vertices
     // Ensure Deform() is called before UpdateDeformedVertices() to populate pose_image
@@ -587,7 +689,28 @@ void frame(void) {
     // Calculate MVP matrix
     HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
+    
+    // Convert model matrix from ImGuizmo format (column-major float array) to HMM_Mat4
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
+    if (g_state.guizmo_enabled && g_state.model_loaded) {
+        // ImGuizmo uses column-major format, HMM uses row-major internally but stores as column-major
+        model_mat.Elements[0][0] = g_state.model_matrix[0];
+        model_mat.Elements[0][1] = g_state.model_matrix[1];
+        model_mat.Elements[0][2] = g_state.model_matrix[2];
+        model_mat.Elements[0][3] = g_state.model_matrix[3];
+        model_mat.Elements[1][0] = g_state.model_matrix[4];
+        model_mat.Elements[1][1] = g_state.model_matrix[5];
+        model_mat.Elements[1][2] = g_state.model_matrix[6];
+        model_mat.Elements[1][3] = g_state.model_matrix[7];
+        model_mat.Elements[2][0] = g_state.model_matrix[8];
+        model_mat.Elements[2][1] = g_state.model_matrix[9];
+        model_mat.Elements[2][2] = g_state.model_matrix[10];
+        model_mat.Elements[2][3] = g_state.model_matrix[11];
+        model_mat.Elements[3][0] = g_state.model_matrix[12];
+        model_mat.Elements[3][1] = g_state.model_matrix[13];
+        model_mat.Elements[3][2] = g_state.model_matrix[14];
+        model_mat.Elements[3][3] = g_state.model_matrix[15];
+    }
     HMM_Mat4 mvp = proj * view * model_mat;
 
     // Prepare uniform data
@@ -627,6 +750,55 @@ void frame(void) {
     ui_pass.swapchain = sglue_swapchain();
     sg_begin_pass(&ui_pass);
     
+    // Draw ImGuizmo gizmo if enabled (must be after simgui_render to use ImGui draw list)
+    if (g_state.guizmo_enabled && g_state.model_loaded) {
+        ImGuizmo::SetDrawlist();
+        ImGuizmo::SetRect(0, 0, (float)width, (float)height);
+        
+        // Convert view and projection matrices to float arrays for ImGuizmo
+        float view_array[16];
+        float proj_array[16];
+        
+        // View matrix (column-major)
+        HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
+        view_array[0] = view.Elements[0][0]; view_array[4] = view.Elements[0][1]; view_array[8] = view.Elements[0][2]; view_array[12] = view.Elements[0][3];
+        view_array[1] = view.Elements[1][0]; view_array[5] = view.Elements[1][1]; view_array[9] = view.Elements[1][2]; view_array[13] = view.Elements[1][3];
+        view_array[2] = view.Elements[2][0]; view_array[6] = view.Elements[2][1]; view_array[10] = view.Elements[2][2]; view_array[14] = view.Elements[2][3];
+        view_array[3] = view.Elements[3][0]; view_array[7] = view.Elements[3][1]; view_array[11] = view.Elements[3][2]; view_array[15] = view.Elements[3][3];
+        
+        // Projection matrix (column-major)
+        HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
+        proj_array[0] = proj.Elements[0][0]; proj_array[4] = proj.Elements[0][1]; proj_array[8] = proj.Elements[0][2]; proj_array[12] = proj.Elements[0][3];
+        proj_array[1] = proj.Elements[1][0]; proj_array[5] = proj.Elements[1][1]; proj_array[9] = proj.Elements[1][2]; proj_array[13] = proj.Elements[1][3];
+        proj_array[2] = proj.Elements[2][0]; proj_array[6] = proj.Elements[2][1]; proj_array[10] = proj.Elements[2][2]; proj_array[14] = proj.Elements[2][3];
+        proj_array[3] = proj.Elements[3][0]; proj_array[7] = proj.Elements[3][1]; proj_array[11] = proj.Elements[3][2]; proj_array[15] = proj.Elements[3][3];
+        
+        // Manipulate model matrix
+        ImGuizmo::Manipulate(view_array, proj_array, g_state.guizmo_operation, g_state.guizmo_mode, g_state.model_matrix);
+    }
+    
+    // Draw Sequencer window if enabled
+    if (g_state.sequencer_enabled && g_state.motion_loaded && g_state.sequencer) {
+        if (ImGui::Begin("Animation Sequencer", &g_state.sequencer_enabled)) {
+            // Draw sequencer timeline
+            ImSequencer::Sequencer(
+                g_state.sequencer.get(),
+                &g_state.sequencer_current_frame,
+                &g_state.sequencer_expanded,
+                &g_state.sequencer_selected_entry,
+                &g_state.sequencer_first_frame,
+                ImSequencer::SEQUENCER_CHANGE_FRAME
+            );
+            
+            // Update animation time if frame changed by sequencer
+            if (g_state.sequencer_current_frame >= 0) {
+                g_state.time = g_state.sequencer_current_frame / 30.0f;
+            }
+            
+            ImGui::End();
+        }
+    }
+
     // Render ImGui
     simgui_render();
     
