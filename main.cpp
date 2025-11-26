@@ -212,10 +212,12 @@ struct {
     
     // Shadow mapping resources
     sg_image shadow_map = {0}; // Depth texture for shadow mapping
-    sg_view shadow_map_view = {0}; // Persistent view for shadow map
+    sg_view shadow_map_view = {0}; // Persistent view for shadow map (as texture)
+    sg_view shadow_map_ds_view = {0}; // Persistent view for shadow map (as depth attachment)
     sg_sampler shadow_sampler = {0}; // Sampler for shadow map (with comparison)
     sg_pipeline shadow_pip = {0}; // Pipeline for shadow pass (depth-only)
-    const int shadow_map_size = 2048; // Shadow map resolution
+    sg_pass shadow_pass = {0}; // Persistent shadow pass (like official demo)
+    const int shadow_map_size = 1024; // Shadow map resolution
     
     // Ground plane (stage)
     sg_buffer ground_vertex_buffer = {0};
@@ -870,31 +872,35 @@ void CreateGroundGeometry() {
 void InitializeShadowMapping() {
     // Create shadow map (depth texture)
     sg_image_desc shadow_desc = {};
-    shadow_desc.type = SG_IMAGETYPE_2D;
+    // shadow_desc.type = SG_IMAGETYPE_2D;
     shadow_desc.width = g_state.shadow_map_size;
     shadow_desc.height = g_state.shadow_map_size;
-    shadow_desc.num_mipmaps = 1;
+    shadow_desc.sample_count = 1;
     shadow_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
-    shadow_desc.usage.immutable = false;
     shadow_desc.usage.depth_stencil_attachment = true;
     shadow_desc.label = "shadow-map";
     g_state.shadow_map = sg_make_image(&shadow_desc);
     
-    // Create persistent view for shadow map
-    sg_view_desc shadow_view_desc = {};
-    shadow_view_desc.texture.image = g_state.shadow_map;
-    g_state.shadow_map_view = sg_make_view(&shadow_view_desc);
+    // Create persistent views for shadow map (like official demo)
+    // One view for texture sampling, one for depth attachment
+    sg_view_desc shadow_tex_view_desc = {};
+    shadow_tex_view_desc.texture.image = g_state.shadow_map;
+    shadow_tex_view_desc.label = "shadow-map-tex-view";
+    g_state.shadow_map_view = sg_make_view(&shadow_tex_view_desc);
     
-    // Create shadow sampler (regular sampler, not comparison sampler)
-    // We do manual depth comparison in the shader using texture() function
+    sg_view_desc shadow_ds_view_desc = {};
+    shadow_ds_view_desc.depth_stencil_attachment.image = g_state.shadow_map;
+    shadow_ds_view_desc.label = "shadow-map-depth-stencil-view";
+    g_state.shadow_map_ds_view = sg_make_view(&shadow_ds_view_desc);
+    
+    // Create shadow sampler with comparison function (like official demo)
+    // This allows hardware-accelerated depth comparison
     sg_sampler_desc shadow_sampler_desc = {};
     shadow_sampler_desc.min_filter = SG_FILTER_LINEAR;
     shadow_sampler_desc.mag_filter = SG_FILTER_LINEAR;
-    shadow_sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_BORDER;
-    shadow_sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_BORDER;
-    shadow_sampler_desc.wrap_w = SG_WRAP_CLAMP_TO_BORDER;
-    shadow_sampler_desc.border_color = SG_BORDERCOLOR_OPAQUE_WHITE;
-    // Note: No compare function - we do manual comparison in shader
+    shadow_sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    shadow_sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    shadow_sampler_desc.compare = SG_COMPAREFUNC_LESS_EQUAL;
     shadow_sampler_desc.label = "shadow-sampler";
     g_state.shadow_sampler = sg_make_sampler(&shadow_sampler_desc);
     
@@ -905,15 +911,31 @@ void InitializeShadowMapping() {
     shadow_pip_desc.layout.buffers[0].stride = sizeof(Vertex);
     shadow_pip_desc.layout.attrs[ATTR_shadow_shadow_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
     shadow_pip_desc.depth.write_enabled = true;
-    shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    // shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    shadow_pip_desc.depth.compare = SG_COMPAREFUNC_ALWAYS;
     shadow_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;
-    shadow_pip_desc.cull_mode = SG_CULLMODE_BACK;
+    // shadow_pip_desc.cull_mode = SG_CULLMODE_FRONT;
+    shadow_pip_desc.cull_mode = SG_CULLMODE_NONE;
     shadow_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     shadow_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     shadow_pip_desc.label = "shadow-pipeline";
     // No color output for shadow pass
     shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_NONE;
     g_state.shadow_pip = sg_make_pipeline(&shadow_pip_desc);
+    
+    // Create persistent shadow pass (like official demo)
+    g_state.shadow_pass = {
+        .action = {
+            .depth = {
+                .load_action = SG_LOADACTION_CLEAR,
+                .store_action = SG_STOREACTION_STORE,
+                .clear_value = 1.0f,
+            },
+        },
+        .attachments = {
+            .depth_stencil = g_state.shadow_map_ds_view,
+        },
+    };
     
     std::cout << "Initialized shadow mapping (resolution: " << g_state.shadow_map_size << "x" << g_state.shadow_map_size << ")" << std::endl;
 }
@@ -2070,33 +2092,42 @@ void frame(void) {
     } else {
         light_up = HMM_Vec3{0.0f, 1.0f, 0.0f}; // Fallback
     }
-    
+
+    light_up = {0.0f, 1.0f, 0.0f};
+
     // Position light far away in the direction opposite to light_dir
     // For directional light, position doesn't matter much, but we place it far away
+    // The light direction points from light source to scene, so we negate it for position
     HMM_Vec3 light_pos = HMM_MulV3F(light_dir, -100.0f);
-    HMM_Vec3 light_target = HMM_Vec3{0.0f, 0.0f, 0.0f}; // Look at origin
+    HMM_Vec3 light_target = HMM_Vec3{0.0f, 0.0f, 0.0f}; // Look at origin (scene center)
     
     // Use orthographic projection for directional light
-    float light_size = 50.0f; // Size of light frustum (covers 50 units in each direction)
-    HMM_Mat4 light_proj = HMM_Orthographic_RH_NO(-light_size, light_size, -light_size, light_size, 0.1f, 200.0f);
+    // Make sure the frustum is large enough to cover the scene
+    // Adjust these values based on your scene size
+    float light_size = 10.0f; // Size of light frustum (covers 50 units in each direction from center)
+    // For shadow mapping, use a reasonable near/far range
+    // Near should be small but not too small to avoid precision issues
+    // Far should be large enough to cover the scene
+    float light_near = 0.1f;  // Increased from 0.1f to avoid precision issues
+    float light_far = 10.0f;
+    HMM_Mat4 light_proj = HMM_Orthographic_RH_NO(-light_size, light_size, -light_size, light_size, light_near, light_far);
     HMM_Mat4 light_view = HMM_LookAt_RH(light_pos, light_target, light_up);
-    HMM_Mat4 light_mvp = light_proj * light_view * model_mat;
+    
+    // Calculate light view-proj matrix
+    // Note: HMM uses right-to-left matrix multiplication (OpenGL style)
+    // So: light_proj * light_view means: first apply view, then apply proj
+    // This is equivalent to: light_proj * light_view (in HMM) = view * proj (in vecmath/row-major)
+    HMM_Mat4 light_view_proj = light_proj * light_view;
+
+    // Calculate light MVP: light_view_proj * model_mat
+    // HMM right-to-left: light_proj * light_view * model_mat
+    // This transforms vertices from model space to light clip space
+    HMM_Mat4 light_mvp = light_view_proj * model_mat;
     
     // Render shadow pass first (before main rendering)
+    // Use persistent shadow pass (like official demo)
     if (g_state.shadows_enabled && g_state.shadow_map.id != 0) {
-        // Create view for shadow map as depth attachment
-        sg_view_desc shadow_depth_view_desc = {};
-        shadow_depth_view_desc.depth_stencil_attachment.image = g_state.shadow_map;
-        sg_view shadow_depth_view = sg_make_view(&shadow_depth_view_desc);
-        
-        // Create shadow pass
-        sg_pass shadow_pass = {};
-        shadow_pass.attachments.depth_stencil = shadow_depth_view;
-        shadow_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
-        shadow_pass.action.depth.clear_value = 1.0f;
-        shadow_pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE; // No color output
-        
-        sg_begin_pass(&shadow_pass);
+        sg_begin_pass(&g_state.shadow_pass);
         sg_apply_pipeline(g_state.shadow_pip);
         
         // Render model to shadow map
@@ -2128,24 +2159,23 @@ void frame(void) {
         }
         
         // Render ground to shadow map
-        if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
-            HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
-            HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
-            
-            shadow_vs_params_t ground_shadow_vs_params;
-            ground_shadow_vs_params.light_mvp = ground_light_mvp;
-            
-            sg_bindings ground_shadow_bind = {};
-            ground_shadow_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
-            ground_shadow_bind.index_buffer = g_state.ground_index_buffer;
-            sg_apply_bindings(&ground_shadow_bind);
-            sg_apply_uniforms(0, SG_RANGE(ground_shadow_vs_params));
-            
-            sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
-        }
+        // if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
+        //     HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
+        //     HMM_Mat4 ground_light_mvp = light_view_proj * ground_model;
+        //
+        //     shadow_vs_params_t ground_shadow_vs_params;
+        //     ground_shadow_vs_params.light_mvp = ground_light_mvp;
+        //
+        //     sg_bindings ground_shadow_bind = {};
+        //     ground_shadow_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
+        //     ground_shadow_bind.index_buffer = g_state.ground_index_buffer;
+        //     sg_apply_bindings(&ground_shadow_bind);
+        //     sg_apply_uniforms(0, SG_RANGE(ground_shadow_vs_params));
+        //
+        //     sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
+        // }
         
         sg_end_pass();
-        sg_destroy_view(shadow_depth_view);
     }
 
     // Begin main rendering pass
@@ -2282,7 +2312,9 @@ void frame(void) {
         
         HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
         HMM_Mat4 ground_mvp = proj * view * ground_model;
-        HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
+        // HMM uses right-to-left matrix multiplication (OpenGL style)
+        // So: light_view_proj * ground_model = light_proj * light_view * ground_model
+        HMM_Mat4 ground_light_mvp = light_view_proj * ground_model;
         
         mmd_vs_params_t ground_vs_params;
         ground_vs_params.mvp = ground_mvp;
@@ -2494,6 +2526,9 @@ void cleanup(void) {
     // Clean up shadow mapping resources
     if (g_state.shadow_map_view.id != 0) {
         sg_destroy_view(g_state.shadow_map_view);
+    }
+    if (g_state.shadow_map_ds_view.id != 0) {
+        sg_destroy_view(g_state.shadow_map_ds_view);
     }
     if (g_state.shadow_map.id != 0) {
         sg_destroy_image(g_state.shadow_map);

@@ -48,7 +48,7 @@ layout(binding=1) uniform sampler prefilter_smp;
 layout(binding=2) uniform texture2D diffuse_texture;
 layout(binding=2) uniform sampler diffuse_smp;
 layout(binding=3) uniform texture2D shadow_map;
-layout(binding=3) uniform sampler shadow_smp; // Shadow sampler with comparison
+layout(binding=3) uniform sampler shadow_smp; // Shadow sampler with comparison (SG_COMPAREFUNC_LESS)
 
 layout(binding=4) uniform fs_params {
     vec3 view_pos;
@@ -72,67 +72,62 @@ vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 }
 
 // Calculate shadow factor using PCF (Percentage Closer Filtering)
+// Following official sokol demo pattern
 float CalculateShadow(vec4 light_space_pos) {
     // Perspective divide
     vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
-    // Transform to [0,1] range
+    // Transform from [-1,1] to [0,1] range for texture sampling
     proj_coords = proj_coords * 0.5 + 0.5;
     
     // Check if fragment is outside light frustum
     if (proj_coords.x < 0.0 || proj_coords.x > 1.0 || 
         proj_coords.y < 0.0 || proj_coords.y > 1.0 ||
-        proj_coords.z > 1.0) {
-        return 1.0; // Not in shadow
+        proj_coords.z < 0.0 || proj_coords.z > 1.0) {
+        return 1.0; // Not in shadow (outside light frustum)
     }
     
-    float current_depth = proj_coords.z;
-    float bias = 0.005; // Shadow bias to prevent shadow acne
+    // Apply shadow bias to prevent shadow acne
+    float bias = 0.005;
+    float shadow_depth = proj_coords.z - bias;
     
-    // Calculate texel size once (outside loop to avoid gradient instruction in loop)
+    // Calculate texel size for PCF
     vec2 texel_size = 1.0 / vec2(textureSize(sampler2D(shadow_map, shadow_smp), 0));
     
-    // Manually unroll 3x3 PCF kernel to avoid gradient instruction warnings
-    // This also improves performance by avoiding loop overhead
+    // Manually unroll 3x3 PCF kernel
+    // With comparison sampler (SG_COMPAREFUNC_LESS), texture() with vec3(uv, depth) 
+    // automatically performs depth comparison and returns 0.0 (shadowed) or 1.0 (lit)
+    // Note: In GLSL, for comparison samplers, we pass depth as the third component
     float shadow_sum = 0.0;
     
     // Row -1
     vec2 offset = vec2(-1.0, -1.0) * texel_size;
-    float depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(0.0, -1.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(1.0, -1.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     // Row 0
     offset = vec2(-1.0, 0.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(0.0, 0.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(1.0, 0.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     // Row 1
     offset = vec2(-1.0, 1.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(0.0, 1.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     offset = vec2(1.0, 1.0) * texel_size;
-    depth = texture(sampler2D(shadow_map, shadow_smp), proj_coords.xy + offset).r;
-    shadow_sum += (current_depth - bias > depth) ? 0.0 : 1.0;
+    shadow_sum += texture(sampler2DShadow(shadow_map, shadow_smp), vec3(proj_coords.xy + offset, shadow_depth));
     
     return shadow_sum / 9.0;
 }
