@@ -12,6 +12,7 @@
 #include "sokol_glue.h"
 #include "sokol_time.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "util/sokol_imgui.h"
 #include "util/sokol_gfx_imgui.h"
 #include "ImGuizmo.h"
@@ -157,6 +158,9 @@ struct {
     };
     ImGuizmo::OPERATION guizmo_operation = ImGuizmo::TRANSLATE;
     ImGuizmo::MODE guizmo_mode = ImGuizmo::WORLD;
+    bool guizmo_use_snap = false;
+    float guizmo_snap[3] = {1.0f, 1.0f, 1.0f};
+    bool guizmo_debug_window = false;
     
     // ImSequencer animation timeline
     bool sequencer_enabled = false;
@@ -393,6 +397,200 @@ void UpdateDeformedVertices() {
     sg_update_buffer(g_state.vertex_buffer, sg_range{vertices.data(), vertices.size() * sizeof(Vertex)});
 }
 
+// ImGuizmo helper functions following official demo pattern
+// Helper functions for matrix calculations (matching official demo)
+static void LookAt(const float* eye, const float* at, const float* up, float* m16) {
+    float X[3], Y[3], Z[3], tmp[3];
+    
+    tmp[0] = eye[0] - at[0];
+    tmp[1] = eye[1] - at[1];
+    tmp[2] = eye[2] - at[2];
+    
+    // Normalize Z
+    float len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
+    if (len > 0.0f) {
+        float invLen = 1.0f / len;
+        Z[0] = tmp[0] * invLen;
+        Z[1] = tmp[1] * invLen;
+        Z[2] = tmp[2] * invLen;
+    } else {
+        Z[0] = Z[1] = 0.0f; Z[2] = 1.0f;
+    }
+    
+    // Normalize Y
+    len = sqrtf(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+    if (len > 0.0f) {
+        float invLen = 1.0f / len;
+        Y[0] = up[0] * invLen;
+        Y[1] = up[1] * invLen;
+        Y[2] = up[2] * invLen;
+    } else {
+        Y[0] = Y[2] = 0.0f; Y[1] = 1.0f;
+    }
+    
+    // Cross Y, Z -> X
+    tmp[0] = Y[1] * Z[2] - Y[2] * Z[1];
+    tmp[1] = Y[2] * Z[0] - Y[0] * Z[2];
+    tmp[2] = Y[0] * Z[1] - Y[1] * Z[0];
+    len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
+    if (len > 0.0f) {
+        float invLen = 1.0f / len;
+        X[0] = tmp[0] * invLen;
+        X[1] = tmp[1] * invLen;
+        X[2] = tmp[2] * invLen;
+    } else {
+        X[0] = X[1] = 0.0f; X[2] = 1.0f;
+    }
+    
+    // Cross Z, X -> Y
+    tmp[0] = Z[1] * X[2] - Z[2] * X[1];
+    tmp[1] = Z[2] * X[0] - Z[0] * X[2];
+    tmp[2] = Z[0] * X[1] - Z[1] * X[0];
+    len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
+    if (len > 0.0f) {
+        float invLen = 1.0f / len;
+        Y[0] = tmp[0] * invLen;
+        Y[1] = tmp[1] * invLen;
+        Y[2] = tmp[2] * invLen;
+    }
+    
+    m16[0] = X[0];
+    m16[1] = Y[0];
+    m16[2] = Z[0];
+    m16[3] = 0.0f;
+    m16[4] = X[1];
+    m16[5] = Y[1];
+    m16[6] = Z[1];
+    m16[7] = 0.0f;
+    m16[8] = X[2];
+    m16[9] = Y[2];
+    m16[10] = Z[2];
+    m16[11] = 0.0f;
+    m16[12] = -(X[0] * eye[0] + X[1] * eye[1] + X[2] * eye[2]);
+    m16[13] = -(Y[0] * eye[0] + Y[1] * eye[1] + Y[2] * eye[2]);
+    m16[14] = -(Z[0] * eye[0] + Z[1] * eye[1] + Z[2] * eye[2]);
+    m16[15] = 1.0f;
+}
+
+static void Perspective(float fovyInDegrees, float aspectRatio, float znear, float zfar, float* m16) {
+    float ymax = znear * tanf(fovyInDegrees * 3.141592f / 180.0f);
+    float xmax = ymax * aspectRatio;
+    
+    // Frustum
+    float temp = 2.0f * znear;
+    float temp2 = 2.0f * xmax;
+    float temp3 = 2.0f * ymax;
+    float temp4 = zfar - znear;
+    
+    m16[0] = temp / temp2;
+    m16[1] = 0.0f;
+    m16[2] = 0.0f;
+    m16[3] = 0.0f;
+    m16[4] = 0.0f;
+    m16[5] = temp / temp3;
+    m16[6] = 0.0f;
+    m16[7] = 0.0f;
+    m16[8] = 0.0f;
+    m16[9] = 0.0f;
+    m16[10] = (-zfar - znear) / temp4;
+    m16[11] = -1.0f;
+    m16[12] = 0.0f;
+    m16[13] = 0.0f;
+    m16[14] = (-temp * zfar) / temp4;
+    m16[15] = 0.0f;
+}
+
+void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
+    // Identity matrix for DrawGrid (column-major)
+    static const float identityMatrix[16] = {
+        1.f, 0.f, 0.f, 0.f,
+        0.f, 1.f, 0.f, 0.f,
+        0.f, 0.f, 1.f, 0.f,
+        0.f, 0.f, 0.f, 1.f
+    };
+
+    ImGuiIO& io = ImGui::GetIO();
+    float viewManipulateRight = io.DisplaySize.x;
+    float viewManipulateTop = 0;
+    static ImGuiWindowFlags gizmoWindowFlags = 0;
+    
+    // We don't use a window (useWindow = false), so draw directly to screen
+    bool useWindow = false;
+    
+    if (useWindow) {
+        ImGui::SetNextWindowSize(ImVec2(800, 400), ImGuiCond_Appearing);
+        ImGui::SetNextWindowPos(ImVec2(400, 20), ImGuiCond_Appearing);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, (ImVec4)ImColor(0.35f, 0.3f, 0.3f));
+        ImGui::Begin("Gizmo", 0, gizmoWindowFlags);
+        ImGuizmo::SetDrawlist();
+    }
+    // When useWindow = false, don't call SetDrawlist() - BeginFrame() already set it
+    // This matches the official demo behavior
+    
+    float windowWidth = useWindow ? (float)ImGui::GetWindowWidth() : io.DisplaySize.x;
+    float windowHeight = useWindow ? (float)ImGui::GetWindowHeight() : io.DisplaySize.y;
+
+    if (!useWindow) {
+        ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+    } else {
+        ImGuizmo::SetRect(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y, windowWidth, windowHeight);
+    }
+    
+    viewManipulateRight = useWindow ? (ImGui::GetWindowPos().x + windowWidth) : io.DisplaySize.x;
+    viewManipulateTop = useWindow ? ImGui::GetWindowPos().y : 0;
+    
+    if (useWindow) {
+        ImGuiWindow* window = ImGui::GetCurrentWindow();
+        gizmoWindowFlags = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(window->InnerRect.Min, window->InnerRect.Max) ? ImGuiWindowFlags_NoMove : 0;
+    } else {
+        // When useWindow = false, we need to ensure we have a valid drawlist
+        // BeginFrame() creates a hidden window, but we should use foreground drawlist for full-screen
+        // Actually, let's not call SetDrawlist here - BeginFrame() should have set it
+        // But we need to make sure it's still valid
+    }
+
+    // Draw helper grid and cubes
+    ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
+    
+    // Draw cube at model position
+    int gizmoCount = 1;
+    ImGuizmo::DrawCubes(cameraView, cameraProjection, matrix, gizmoCount);
+
+    // View manipulate widget (camera control in top-right corner)
+    ImGuizmo::ViewManipulate(cameraView, g_state.camera_distance, ImVec2(viewManipulateRight - 128, viewManipulateTop), ImVec2(128, 128), 0x10101010);
+}
+
+void TransformEnd() {
+    bool useWindow = false;
+    if (useWindow) {
+        ImGui::End();
+        ImGui::PopStyleColor(1);
+    }
+}
+
+void EditTransform(float* cameraView, float* cameraProjection, float* matrix) {
+    ImGuiIO& io = ImGui::GetIO();
+    bool useWindow = false;
+    
+    // Ensure drawlist is set before calling Manipulate
+    // When useWindow = false, BeginFrame() should have set it, but we need to ensure it's still valid
+    if (!useWindow) {
+        // Use foreground drawlist for full-screen gizmo to ensure it's always valid
+        ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
+        ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+    } else {
+        float windowWidth = (float)ImGui::GetWindowWidth();
+        float windowHeight = (float)ImGui::GetWindowHeight();
+        ImGuizmo::SetRect(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y, windowWidth, windowHeight);
+    }
+    
+    // Enable gizmo (must be called before Manipulate)
+    ImGuizmo::Enable(true);
+    
+    // Call Manipulate - this draws the gizmo
+    ImGuizmo::Manipulate(cameraView, cameraProjection, g_state.guizmo_operation, g_state.guizmo_mode, matrix, NULL, g_state.guizmo_use_snap ? g_state.guizmo_snap : NULL);
+}
+
 // Initialization function
 void init(void) {
     // Setup sokol-gfx (following triangle-sapp example, using C++ compatible syntax)
@@ -472,6 +670,9 @@ void frame(void) {
     simgui_frame.dpi_scale = sapp_dpi_scale();
     simgui_new_frame(&simgui_frame);
     
+    // Begin ImGuizmo frame (must be called after ImGui new frame)
+    ImGuizmo::BeginFrame();
+    
     // Draw menu bar with file operations and debug options
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
@@ -537,6 +738,10 @@ void frame(void) {
             ImGui::MenuItem("Animation Sequencer", nullptr, &g_state.sequencer_enabled);
             ImGui::EndMenu();
         }
+        if (g_state.guizmo_enabled && ImGui::BeginMenu("Gizmo Debug")) {
+            ImGui::MenuItem("Gizmo Controls", nullptr, &g_state.guizmo_debug_window);
+            ImGui::EndMenu();
+        }
         ImGui::EndMainMenuBar();
     }
     
@@ -578,6 +783,57 @@ void frame(void) {
     
     // Draw sokol-gfx debug windows
     sgimgui_draw(&g_state.sgimgui);
+    
+    // Draw ImGuizmo debug window
+    if (g_state.guizmo_debug_window && g_state.guizmo_enabled) {
+        if (ImGui::Begin("Gizmo Debug", &g_state.guizmo_debug_window)) {
+            ImGui::Text("Gizmo State:");
+            ImGui::Text("IsOver: %s", ImGuizmo::IsOver() ? "Yes" : "No");
+            ImGui::Text("IsUsing: %s", ImGuizmo::IsUsing() ? "Yes" : "No");
+            ImGui::Text("IsOver(TRANSLATE): %s", ImGuizmo::IsOver(ImGuizmo::TRANSLATE) ? "Yes" : "No");
+            ImGui::Text("IsOver(ROTATE): %s", ImGuizmo::IsOver(ImGuizmo::ROTATE) ? "Yes" : "No");
+            ImGui::Text("IsOver(SCALE): %s", ImGuizmo::IsOver(ImGuizmo::SCALE) ? "Yes" : "No");
+            
+            ImGui::Separator();
+            ImGui::Text("Operation:");
+            if (ImGui::RadioButton("Translate", g_state.guizmo_operation == ImGuizmo::TRANSLATE)) {
+                g_state.guizmo_operation = ImGuizmo::TRANSLATE;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Rotate", g_state.guizmo_operation == ImGuizmo::ROTATE)) {
+                g_state.guizmo_operation = ImGuizmo::ROTATE;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Scale", g_state.guizmo_operation == ImGuizmo::SCALE)) {
+                g_state.guizmo_operation = ImGuizmo::SCALE;
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Mode:");
+            if (ImGui::RadioButton("Local", g_state.guizmo_mode == ImGuizmo::LOCAL)) {
+                g_state.guizmo_mode = ImGuizmo::LOCAL;
+            }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("World", g_state.guizmo_mode == ImGuizmo::WORLD)) {
+                g_state.guizmo_mode = ImGuizmo::WORLD;
+            }
+            
+            ImGui::Separator();
+            ImGui::Text("Model Matrix (column-major):");
+            ImGui::InputFloat4("Col 0", &g_state.model_matrix[0]);
+            ImGui::InputFloat4("Col 1", &g_state.model_matrix[4]);
+            ImGui::InputFloat4("Col 2", &g_state.model_matrix[8]);
+            ImGui::InputFloat4("Col 3", &g_state.model_matrix[12]);
+            
+            if (ImGui::Button("Reset Matrix")) {
+                g_state.model_matrix[0] = 1.0f; g_state.model_matrix[1] = 0.0f; g_state.model_matrix[2] = 0.0f; g_state.model_matrix[3] = 0.0f;
+                g_state.model_matrix[4] = 0.0f; g_state.model_matrix[5] = 1.0f; g_state.model_matrix[6] = 0.0f; g_state.model_matrix[7] = 0.0f;
+                g_state.model_matrix[8] = 0.0f; g_state.model_matrix[9] = 0.0f; g_state.model_matrix[10] = 1.0f; g_state.model_matrix[11] = 0.0f;
+                g_state.model_matrix[12] = 0.0f; g_state.model_matrix[13] = 0.0f; g_state.model_matrix[14] = 0.0f; g_state.model_matrix[15] = 1.0f;
+            }
+        }
+        ImGui::End();
+    }
     
     // Update animation time (only if playing and not manually controlled by sequencer)
     if (g_state.animation_playing && !g_state.sequencer_manual_control) {
@@ -719,22 +975,27 @@ void frame(void) {
     // Convert model matrix from ImGuizmo format (column-major float array) to HMM_Mat4
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
     if (g_state.guizmo_enabled && g_state.model_loaded) {
-        // ImGuizmo uses column-major format, HMM uses row-major internally but stores as column-major
+        // ImGuizmo uses column-major format: array[col*4 + row]
+        // HMM Elements[row][col], so: Elements[row][col] = array[col*4 + row]
+        // Column 0
         model_mat.Elements[0][0] = g_state.model_matrix[0];
-        model_mat.Elements[0][1] = g_state.model_matrix[1];
-        model_mat.Elements[0][2] = g_state.model_matrix[2];
-        model_mat.Elements[0][3] = g_state.model_matrix[3];
-        model_mat.Elements[1][0] = g_state.model_matrix[4];
+        model_mat.Elements[1][0] = g_state.model_matrix[1];
+        model_mat.Elements[2][0] = g_state.model_matrix[2];
+        model_mat.Elements[3][0] = g_state.model_matrix[3];
+        // Column 1
+        model_mat.Elements[0][1] = g_state.model_matrix[4];
         model_mat.Elements[1][1] = g_state.model_matrix[5];
-        model_mat.Elements[1][2] = g_state.model_matrix[6];
-        model_mat.Elements[1][3] = g_state.model_matrix[7];
-        model_mat.Elements[2][0] = g_state.model_matrix[8];
-        model_mat.Elements[2][1] = g_state.model_matrix[9];
+        model_mat.Elements[2][1] = g_state.model_matrix[6];
+        model_mat.Elements[3][1] = g_state.model_matrix[7];
+        // Column 2
+        model_mat.Elements[0][2] = g_state.model_matrix[8];
+        model_mat.Elements[1][2] = g_state.model_matrix[9];
         model_mat.Elements[2][2] = g_state.model_matrix[10];
-        model_mat.Elements[2][3] = g_state.model_matrix[11];
-        model_mat.Elements[3][0] = g_state.model_matrix[12];
-        model_mat.Elements[3][1] = g_state.model_matrix[13];
-        model_mat.Elements[3][2] = g_state.model_matrix[14];
+        model_mat.Elements[3][2] = g_state.model_matrix[11];
+        // Column 3
+        model_mat.Elements[0][3] = g_state.model_matrix[12];
+        model_mat.Elements[1][3] = g_state.model_matrix[13];
+        model_mat.Elements[2][3] = g_state.model_matrix[14];
         model_mat.Elements[3][3] = g_state.model_matrix[15];
     }
     HMM_Mat4 mvp = proj * view * model_mat;
@@ -776,31 +1037,33 @@ void frame(void) {
     ui_pass.swapchain = sglue_swapchain();
     sg_begin_pass(&ui_pass);
     
-    // Draw ImGuizmo gizmo if enabled (must be after simgui_render to use ImGui draw list)
+    // Draw ImGuizmo gizmo if enabled
+    // Must be called in ImGui context, after all ImGui windows but before simgui_render()
+    // Following the official demo pattern: https://github.com/CedricGuillemet/ImGuizmo/blob/master/example/main.cpp
     if (g_state.guizmo_enabled && g_state.model_loaded) {
-        ImGuizmo::SetDrawlist();
-        ImGuizmo::SetRect(0, 0, (float)width, (float)height);
-        
         // Convert view and projection matrices to float arrays for ImGuizmo
         float view_array[16];
         float proj_array[16];
+
+        // View matrix (column-major for ImGuizmo)
+        // Use official demo's LookAt function to match ImGuizmo's expectations
+        float eye[3] = {g_state.camera_pos.X, g_state.camera_pos.Y, g_state.camera_pos.Z};
+        float at[3] = {g_state.camera_target.X, g_state.camera_target.Y, g_state.camera_target.Z};
+        float up[3] = {0.0f, 1.0f, 0.0f};
+        LookAt(eye, at, up, view_array);
+
+        // Projection matrix (column-major for ImGuizmo)
+        // Use official demo's Perspective function to match ImGuizmo's expectations
+        Perspective(g_state.camera_fov, (float)width / (float)height, 0.1f, 1000.0f, proj_array);
+
+        // Set orthographic mode (must be called before using gizmo, like in official demo)
+        ImGuizmo::SetOrthographic(false);  // We're using perspective projection
         
-        // View matrix (column-major)
-        HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
-        view_array[0] = view.Elements[0][0]; view_array[4] = view.Elements[0][1]; view_array[8] = view.Elements[0][2]; view_array[12] = view.Elements[0][3];
-        view_array[1] = view.Elements[1][0]; view_array[5] = view.Elements[1][1]; view_array[9] = view.Elements[1][2]; view_array[13] = view.Elements[1][3];
-        view_array[2] = view.Elements[2][0]; view_array[6] = view.Elements[2][1]; view_array[10] = view.Elements[2][2]; view_array[14] = view.Elements[2][3];
-        view_array[3] = view.Elements[3][0]; view_array[7] = view.Elements[3][1]; view_array[11] = view.Elements[3][2]; view_array[15] = view.Elements[3][3];
-        
-        // Projection matrix (column-major)
-        HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
-        proj_array[0] = proj.Elements[0][0]; proj_array[4] = proj.Elements[0][1]; proj_array[8] = proj.Elements[0][2]; proj_array[12] = proj.Elements[0][3];
-        proj_array[1] = proj.Elements[1][0]; proj_array[5] = proj.Elements[1][1]; proj_array[9] = proj.Elements[1][2]; proj_array[13] = proj.Elements[1][3];
-        proj_array[2] = proj.Elements[2][0]; proj_array[6] = proj.Elements[2][1]; proj_array[10] = proj.Elements[2][2]; proj_array[14] = proj.Elements[2][3];
-        proj_array[3] = proj.Elements[3][0]; proj_array[7] = proj.Elements[3][1]; proj_array[11] = proj.Elements[3][2]; proj_array[15] = proj.Elements[3][3];
-        
-        // Manipulate model matrix
-        ImGuizmo::Manipulate(view_array, proj_array, g_state.guizmo_operation, g_state.guizmo_mode, g_state.model_matrix);
+        // Note: BeginFrame() is already called at the start of frame() function (line 560)
+        // Following official demo pattern: TransformStart -> EditTransform -> TransformEnd
+        TransformStart(view_array, proj_array, g_state.model_matrix);
+        EditTransform(view_array, proj_array, g_state.model_matrix);
+        TransformEnd();
     }
     
     // Draw Sequencer window if enabled
