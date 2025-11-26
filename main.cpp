@@ -161,6 +161,7 @@ struct {
     bool guizmo_use_snap = false;
     float guizmo_snap[3] = {1.0f, 1.0f, 1.0f};
     bool guizmo_debug_window = false;
+    bool guizmo_draw_grid = false;  // DrawGrid开关
     
     // ImSequencer animation timeline
     bool sequencer_enabled = false;
@@ -398,108 +399,6 @@ void UpdateDeformedVertices() {
 }
 
 // ImGuizmo helper functions following official demo pattern
-// Helper functions for matrix calculations (matching official demo)
-static void LookAt(const float* eye, const float* at, const float* up, float* m16) {
-    float X[3], Y[3], Z[3], tmp[3];
-    
-    tmp[0] = eye[0] - at[0];
-    tmp[1] = eye[1] - at[1];
-    tmp[2] = eye[2] - at[2];
-    
-    // Normalize Z
-    float len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
-    if (len > 0.0f) {
-        float invLen = 1.0f / len;
-        Z[0] = tmp[0] * invLen;
-        Z[1] = tmp[1] * invLen;
-        Z[2] = tmp[2] * invLen;
-    } else {
-        Z[0] = Z[1] = 0.0f; Z[2] = 1.0f;
-    }
-    
-    // Normalize Y
-    len = sqrtf(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
-    if (len > 0.0f) {
-        float invLen = 1.0f / len;
-        Y[0] = up[0] * invLen;
-        Y[1] = up[1] * invLen;
-        Y[2] = up[2] * invLen;
-    } else {
-        Y[0] = Y[2] = 0.0f; Y[1] = 1.0f;
-    }
-    
-    // Cross Y, Z -> X
-    tmp[0] = Y[1] * Z[2] - Y[2] * Z[1];
-    tmp[1] = Y[2] * Z[0] - Y[0] * Z[2];
-    tmp[2] = Y[0] * Z[1] - Y[1] * Z[0];
-    len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
-    if (len > 0.0f) {
-        float invLen = 1.0f / len;
-        X[0] = tmp[0] * invLen;
-        X[1] = tmp[1] * invLen;
-        X[2] = tmp[2] * invLen;
-    } else {
-        X[0] = X[1] = 0.0f; X[2] = 1.0f;
-    }
-    
-    // Cross Z, X -> Y
-    tmp[0] = Z[1] * X[2] - Z[2] * X[1];
-    tmp[1] = Z[2] * X[0] - Z[0] * X[2];
-    tmp[2] = Z[0] * X[1] - Z[1] * X[0];
-    len = sqrtf(tmp[0] * tmp[0] + tmp[1] * tmp[1] + tmp[2] * tmp[2]);
-    if (len > 0.0f) {
-        float invLen = 1.0f / len;
-        Y[0] = tmp[0] * invLen;
-        Y[1] = tmp[1] * invLen;
-        Y[2] = tmp[2] * invLen;
-    }
-    
-    m16[0] = X[0];
-    m16[1] = Y[0];
-    m16[2] = Z[0];
-    m16[3] = 0.0f;
-    m16[4] = X[1];
-    m16[5] = Y[1];
-    m16[6] = Z[1];
-    m16[7] = 0.0f;
-    m16[8] = X[2];
-    m16[9] = Y[2];
-    m16[10] = Z[2];
-    m16[11] = 0.0f;
-    m16[12] = -(X[0] * eye[0] + X[1] * eye[1] + X[2] * eye[2]);
-    m16[13] = -(Y[0] * eye[0] + Y[1] * eye[1] + Y[2] * eye[2]);
-    m16[14] = -(Z[0] * eye[0] + Z[1] * eye[1] + Z[2] * eye[2]);
-    m16[15] = 1.0f;
-}
-
-static void Perspective(float fovyInDegrees, float aspectRatio, float znear, float zfar, float* m16) {
-    float ymax = znear * tanf(fovyInDegrees * 3.141592f / 180.0f);
-    float xmax = ymax * aspectRatio;
-    
-    // Frustum
-    float temp = 2.0f * znear;
-    float temp2 = 2.0f * xmax;
-    float temp3 = 2.0f * ymax;
-    float temp4 = zfar - znear;
-    
-    m16[0] = temp / temp2;
-    m16[1] = 0.0f;
-    m16[2] = 0.0f;
-    m16[3] = 0.0f;
-    m16[4] = 0.0f;
-    m16[5] = temp / temp3;
-    m16[6] = 0.0f;
-    m16[7] = 0.0f;
-    m16[8] = 0.0f;
-    m16[9] = 0.0f;
-    m16[10] = (-zfar - znear) / temp4;
-    m16[11] = -1.0f;
-    m16[12] = 0.0f;
-    m16[13] = 0.0f;
-    m16[14] = (-temp * zfar) / temp4;
-    m16[15] = 0.0f;
-}
-
 void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     // Identity matrix for DrawGrid (column-major)
     static const float identityMatrix[16] = {
@@ -549,14 +448,17 @@ void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
         // But we need to make sure it's still valid
     }
 
-    // Draw helper grid and cubes
-    // ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
+    // Draw helper grid and cubes (only if enabled)
+    if (g_state.guizmo_draw_grid) {
+        ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
+    }
     
     // Draw cube at model position
     int gizmoCount = 1;
     ImGuizmo::DrawCubes(cameraView, cameraProjection, matrix, gizmoCount);
 
     // View manipulate widget (camera control in top-right corner)
+    // ViewManipulate modifies the view matrix directly, so we need to update camera parameters after it
     ImGuizmo::ViewManipulate(cameraView, g_state.camera_distance, ImVec2(viewManipulateRight - 128, viewManipulateTop), ImVec2(128, 128), 0x10101010);
 }
 
@@ -817,6 +719,9 @@ void frame(void) {
             if (ImGui::RadioButton("World", g_state.guizmo_mode == ImGuizmo::WORLD)) {
                 g_state.guizmo_mode = ImGuizmo::WORLD;
             }
+            
+            ImGui::Separator();
+            ImGui::Checkbox("Draw Grid", &g_state.guizmo_draw_grid);
             
             ImGui::Separator();
             ImGui::Text("Model Matrix (column-major):");
