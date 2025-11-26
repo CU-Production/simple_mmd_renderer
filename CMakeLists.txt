@@ -90,4 +90,4 @@ include_directories(${CMAKE_BINARY_DIR})
 
 add_executable(simple_mmd_renderer main.cpp)
 add_dependencies(simple_mmd_renderer shader_header)
-target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui mmd sokol stb)
+target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui mmd sokol stb nfd)

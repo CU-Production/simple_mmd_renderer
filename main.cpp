@@ -18,6 +18,7 @@
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
+#include "nfd.h"
 
 #include <iostream>
 #include <vector>
@@ -377,8 +378,50 @@ void frame(void) {
     simgui_frame.dpi_scale = sapp_dpi_scale();
     simgui_new_frame(&simgui_frame);
     
-    // Draw menu bar with sokol-gfx debug options
+    // Draw menu bar with file operations and debug options
     if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Open PMX Model...")) {
+                nfdu8char_t* outPath = nullptr;
+                nfdu8filteritem_t filterItem[1] = {{"PMX Model Files", "pmx"}};
+                nfdresult_t result = NFD_OpenDialogU8(&outPath, filterItem, 1, nullptr);
+                
+                if (result == NFD_OKAY) {
+                    std::string filename(outPath);
+                    if (LoadPMXModel(filename)) {
+                        if (g_state.model_loaded) {
+                            UpdateModelBuffers();
+                            // Reset animation time when loading new model
+                            g_state.time = 0.0f;
+                        }
+                    }
+                    NFD_FreePathU8(outPath);
+                } else if (result == NFD_CANCEL) {
+                    // User cancelled, do nothing
+                } else {
+                    std::cerr << "Error opening file dialog: " << NFD_GetError() << std::endl;
+                }
+            }
+            if (ImGui::MenuItem("Open VMD Motion...")) {
+                nfdu8char_t* outPath = nullptr;
+                nfdu8filteritem_t filterItem[1] = {{"VMD Motion Files", "vmd"}};
+                nfdresult_t result = NFD_OpenDialogU8(&outPath, filterItem, 1, nullptr);
+                
+                if (result == NFD_OKAY) {
+                    std::string filename(outPath);
+                    if (LoadVMDMotion(filename)) {
+                        // Reset animation time when loading new motion
+                        g_state.time = 0.0f;
+                    }
+                    NFD_FreePathU8(outPath);
+                } else if (result == NFD_CANCEL) {
+                    // User cancelled, do nothing
+                } else {
+                    std::cerr << "Error opening file dialog: " << NFD_GetError() << std::endl;
+                }
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("sokol-gfx")) {
             ImGui::MenuItem("Capabilities", nullptr, &g_state.sgimgui.caps_window.open);
             ImGui::MenuItem("Frame Stats", nullptr, &g_state.sgimgui.frame_stats_window.open);
@@ -457,12 +500,12 @@ void frame(void) {
             g_state.poser->PrePhysicsPosing();
             g_state.poser->PostPhysicsPosing();
             
-            // Debug: print frame number every second
-            static size_t last_frame = 0;
-            if (frame != last_frame && frame % 30 == 0) {
-                std::cout << "Animation frame: " << frame << " (time: " << g_state.time << "s)" << std::endl;
-                last_frame = frame;
-            }
+            // // Debug: print frame number every second
+            // static size_t last_frame = 0;
+            // if (frame != last_frame && frame % 30 == 0) {
+            //     std::cout << "Animation frame: " << frame << " (time: " << g_state.time << "s)" << std::endl;
+            //     last_frame = frame;
+            // }
         }
         
         // Apply deformation (calculates deformed vertex positions)

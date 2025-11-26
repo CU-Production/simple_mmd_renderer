@@ -21,3 +21,6 @@ target_include_directories(sokol INTERFACE sokol)
 # stb
 add_library(stb INTERFACE)
 target_include_directories(stb INTERFACE stb)
+
+# nfd
+add_subdirectory(nativefiledialog-extended)
