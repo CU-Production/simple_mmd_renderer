@@ -1,4 +1,5 @@
 #define SOKOL_IMPL
+#define SOKOL_TRACE_HOOKS
 #ifdef _WIN32
 // #define SOKOL_D3D11
 #include <windows.h>
@@ -10,6 +11,9 @@
 #include "sokol_log.h"
 #include "sokol_glue.h"
 #include "sokol_time.h"
+#include "imgui.h"
+#include "util/sokol_imgui.h"
+#include "util/sokol_gfx_imgui.h"
 
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
@@ -45,7 +49,8 @@ struct {
     
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
-
+    
+    sgimgui_t sgimgui;
     
     float time = 0.0f;
     bool model_loaded = false;
@@ -248,6 +253,15 @@ void init(void) {
     _sg_desc.logger.func = slog_func;
     sg_setup(&_sg_desc);
     
+    // Setup ImGui
+    simgui_desc_t _simgui_desc = {};
+    _simgui_desc.logger.func = slog_func;
+    simgui_setup(&_simgui_desc);
+    
+    // Setup sokol-gfx ImGui debug UI
+    sgimgui_desc_t _sgimgui_desc = {};
+    sgimgui_init(&g_state.sgimgui, &_sgimgui_desc);
+    
     // Create shader (using generated shader descriptor)
     sg_shader shd = sg_make_shader(mmd_mmd_shader_desc(sg_query_backend()));
     
@@ -297,6 +311,37 @@ void frame(void) {
     const float dt = sapp_frame_duration();
     g_state.time += dt;
     
+    int width = sapp_width();
+    int height = sapp_height();
+    
+    // Setup ImGui frame
+    simgui_frame_desc_t simgui_frame = {};
+    simgui_frame.width = width;
+    simgui_frame.height = height;
+    simgui_frame.delta_time = dt;
+    simgui_frame.dpi_scale = sapp_dpi_scale();
+    simgui_new_frame(&simgui_frame);
+    
+    // Draw menu bar with sokol-gfx debug options
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("sokol-gfx")) {
+            ImGui::MenuItem("Capabilities", nullptr, &g_state.sgimgui.caps_window.open);
+            ImGui::MenuItem("Frame Stats", nullptr, &g_state.sgimgui.frame_stats_window.open);
+            ImGui::MenuItem("Buffers", nullptr, &g_state.sgimgui.buffer_window.open);
+            ImGui::MenuItem("Images", nullptr, &g_state.sgimgui.image_window.open);
+            ImGui::MenuItem("Samplers", nullptr, &g_state.sgimgui.sampler_window.open);
+            ImGui::MenuItem("Shaders", nullptr, &g_state.sgimgui.shader_window.open);
+            ImGui::MenuItem("Pipelines", nullptr, &g_state.sgimgui.pipeline_window.open);
+            ImGui::MenuItem("Views", nullptr, &g_state.sgimgui.view_window.open);
+            ImGui::MenuItem("Calls", nullptr, &g_state.sgimgui.capture_window.open);
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+    
+    // Draw sokol-gfx debug windows
+    sgimgui_draw(&g_state.sgimgui);
+    
     // Update animation
     if (g_state.model_loaded && g_state.motion_loaded && g_state.motion_player && g_state.poser) {
         // Calculate current frame (assuming 30 FPS)
@@ -307,9 +352,6 @@ void frame(void) {
         g_state.poser->ResetPosing();
         g_state.poser->Deform();
     }
-    
-    int width = sapp_width();
-    int height = sapp_height();
     
     // Calculate MVP matrix
     HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
@@ -345,6 +387,9 @@ void frame(void) {
         }
     }
     
+    // Render ImGui
+    simgui_render();
+    
     sg_end_pass();
     sg_commit();
 }
@@ -357,14 +402,22 @@ void cleanup(void) {
     if (g_state.index_buffer.id != 0) {
         sg_destroy_buffer(g_state.index_buffer);
     }
+    sgimgui_discard(&g_state.sgimgui);
+    simgui_shutdown();
     sg_shutdown();
 }
 
 // Input event handler
 void input(const sapp_event* ev) {
-    if (ev->type == SAPP_EVENTTYPE_KEY_DOWN) {
-        if (ev->key_code == SAPP_KEYCODE_ESCAPE) {
-            sapp_request_quit();
+    // Handle ImGui events first
+    bool imgui_wants_input = simgui_handle_event(ev);
+    
+    // Only handle our own events if ImGui doesn't want them
+    if (!imgui_wants_input) {
+        if (ev->type == SAPP_EVENTTYPE_KEY_DOWN) {
+            if (ev->key_code == SAPP_KEYCODE_ESCAPE) {
+                sapp_request_quit();
+            }
         }
     }
 }
