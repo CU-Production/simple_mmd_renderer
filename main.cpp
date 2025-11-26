@@ -41,6 +41,7 @@ struct {
     sg_pipeline pip;
     sg_bindings bind;
     sg_pass_action pass_action;
+    sg_pass_action ui_pass_action;
     
     std::shared_ptr<mmd::Model> model;
     std::shared_ptr<mmd::Motion> motion;
@@ -288,6 +289,9 @@ void init(void) {
     g_state.pass_action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.1f,0.1f, 0.15f, 1.0f} };
     g_state.pass_action.depth = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f };
 
+    // Set UI Pass
+    g_state.ui_pass_action.colors[0] = { .load_action = SG_LOADACTION_LOAD };
+
     // Initialize time
     stm_setup();
     
@@ -387,9 +391,19 @@ void frame(void) {
         }
     }
     
+    // End model rendering pass
+    sg_end_pass();
+    
+    // Begin UI pass for ImGui (separate pass, don't clear color buffer)
+    sg_pass ui_pass = {};
+    ui_pass.action = g_state.ui_pass_action;
+    ui_pass.swapchain = sglue_swapchain();
+    sg_begin_pass(&ui_pass);
+    
     // Render ImGui
     simgui_render();
     
+    // End UI pass
     sg_end_pass();
     sg_commit();
 }
