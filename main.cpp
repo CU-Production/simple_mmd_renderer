@@ -1052,24 +1052,15 @@ void frame(void) {
     // Following the official demo pattern: https://github.com/CedricGuillemet/ImGuizmo/blob/master/example/main.cpp
     if (g_state.guizmo_enabled && g_state.model_loaded) {
         // Convert view and projection matrices to float arrays for ImGuizmo
-        // Use the same matrices as rendering to ensure consistency
         float view_array[16];
         float proj_array[16];
-
-        // Convert HMM view and projection matrices to column-major float array for ImGuizmo
-        // HMM uses Elements[row][col] which is column-major storage
-        // However, HMM's matrix layout differs from what ImGuizmo expects
-        // HMM's Perspective has -1.0f at Elements[2][3], while ImGuizmo expects it at Elements[3][2]
-        // So we need to transpose the matrices to match ImGuizmo's expected format
-        HMM_Mat4 view_transposed = HMM_TransposeM4(view);
-        HMM_Mat4 proj_transposed = HMM_TransposeM4(proj);
         
         // After transposition, copy by columns: array[col*4 + row] = transposed.Elements[row][col]
         // This is equivalent to copying the original matrix by rows
         for (int col = 0; col < 4; col++) {
             for (int row = 0; row < 4; row++) {
-                view_array[col * 4 + row] = view_transposed.Elements[row][col];
-                proj_array[col * 4 + row] = proj_transposed.Elements[row][col];
+                view_array[col * 4 + row] = view.Elements[col][row];
+                proj_array[col * 4 + row] = proj.Elements[col][row];
             }
         }
 
