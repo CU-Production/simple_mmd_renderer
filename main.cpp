@@ -550,7 +550,7 @@ void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     }
 
     // Draw helper grid and cubes
-    ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
+    // ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
     
     // Draw cube at model position
     int gizmoCount = 1;
@@ -976,27 +976,38 @@ void frame(void) {
     HMM_Mat4 model_mat = HMM_M4D(1.0f);
     if (g_state.guizmo_enabled && g_state.model_loaded) {
         // ImGuizmo uses column-major format: array[col*4 + row]
-        // HMM Elements[row][col], so: Elements[row][col] = array[col*4 + row]
-        // Column 0
+        // The array layout in memory (column-major) is:
+        //   array[0]  array[4]  array[8]   array[12]   <- row 0
+        //   array[1]  array[5]  array[9]   array[13]   <- row 1
+        //   array[2]  array[6]  array[10]  array[14]   <- row 2
+        //   array[3]  array[7]  array[11]  array[15]   <- row 3
+        // HMM Elements[row][col] stores matrix in column-major order internally
+        // So: Elements[row][col] = array[col*4 + row]
+        // Column 0 (stored at indices 0-3)
         model_mat.Elements[0][0] = g_state.model_matrix[0];
         model_mat.Elements[1][0] = g_state.model_matrix[1];
         model_mat.Elements[2][0] = g_state.model_matrix[2];
         model_mat.Elements[3][0] = g_state.model_matrix[3];
-        // Column 1
+        // Column 1 (stored at indices 4-7)
         model_mat.Elements[0][1] = g_state.model_matrix[4];
         model_mat.Elements[1][1] = g_state.model_matrix[5];
         model_mat.Elements[2][1] = g_state.model_matrix[6];
         model_mat.Elements[3][1] = g_state.model_matrix[7];
-        // Column 2
+        // Column 2 (stored at indices 8-11)
         model_mat.Elements[0][2] = g_state.model_matrix[8];
         model_mat.Elements[1][2] = g_state.model_matrix[9];
         model_mat.Elements[2][2] = g_state.model_matrix[10];
         model_mat.Elements[3][2] = g_state.model_matrix[11];
-        // Column 3
+        // Column 3 (stored at indices 12-15)
         model_mat.Elements[0][3] = g_state.model_matrix[12];
         model_mat.Elements[1][3] = g_state.model_matrix[13];
         model_mat.Elements[2][3] = g_state.model_matrix[14];
         model_mat.Elements[3][3] = g_state.model_matrix[15];
+        
+        // ImGuizmo returns matrices in column-major format, but the matrix multiplication
+        // convention or coordinate system may require transposition.
+        // Transpose to fix rotation direction and translation issues
+        model_mat = HMM_TransposeM4(model_mat);
     }
     HMM_Mat4 mvp = proj * view * model_mat;
 
