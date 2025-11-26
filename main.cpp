@@ -998,15 +998,14 @@ void frame(void) {
         model_mat.Elements[1][2] = g_state.model_matrix[9];
         model_mat.Elements[2][2] = g_state.model_matrix[10];
         model_mat.Elements[3][2] = g_state.model_matrix[11];
-        // Column 3 (stored at indices 12-15)
+        // Column 3 (stored at indices 12-15) - translation part
         model_mat.Elements[0][3] = g_state.model_matrix[12];
         model_mat.Elements[1][3] = g_state.model_matrix[13];
         model_mat.Elements[2][3] = g_state.model_matrix[14];
         model_mat.Elements[3][3] = g_state.model_matrix[15];
         
-        // ImGuizmo returns matrices in column-major format, but the matrix multiplication
-        // convention or coordinate system may require transposition.
-        // Transpose to fix rotation direction and translation issues
+        // Transpose the entire matrix to fix rotation direction
+        // This is necessary because ImGuizmo's matrix format doesn't match HMM's convention
         model_mat = HMM_TransposeM4(model_mat);
     }
     HMM_Mat4 mvp = proj * view * model_mat;
@@ -1053,19 +1052,26 @@ void frame(void) {
     // Following the official demo pattern: https://github.com/CedricGuillemet/ImGuizmo/blob/master/example/main.cpp
     if (g_state.guizmo_enabled && g_state.model_loaded) {
         // Convert view and projection matrices to float arrays for ImGuizmo
+        // Use the same matrices as rendering to ensure consistency
         float view_array[16];
         float proj_array[16];
 
-        // View matrix (column-major for ImGuizmo)
-        // Use official demo's LookAt function to match ImGuizmo's expectations
-        float eye[3] = {g_state.camera_pos.X, g_state.camera_pos.Y, g_state.camera_pos.Z};
-        float at[3] = {g_state.camera_target.X, g_state.camera_target.Y, g_state.camera_target.Z};
-        float up[3] = {0.0f, 1.0f, 0.0f};
-        LookAt(eye, at, up, view_array);
-
-        // Projection matrix (column-major for ImGuizmo)
-        // Use official demo's Perspective function to match ImGuizmo's expectations
-        Perspective(g_state.camera_fov, (float)width / (float)height, 0.1f, 1000.0f, proj_array);
+        // Convert HMM view and projection matrices to column-major float array for ImGuizmo
+        // HMM uses Elements[row][col] which is column-major storage
+        // However, HMM's matrix layout differs from what ImGuizmo expects
+        // HMM's Perspective has -1.0f at Elements[2][3], while ImGuizmo expects it at Elements[3][2]
+        // So we need to transpose the matrices to match ImGuizmo's expected format
+        HMM_Mat4 view_transposed = HMM_TransposeM4(view);
+        HMM_Mat4 proj_transposed = HMM_TransposeM4(proj);
+        
+        // After transposition, copy by columns: array[col*4 + row] = transposed.Elements[row][col]
+        // This is equivalent to copying the original matrix by rows
+        for (int col = 0; col < 4; col++) {
+            for (int row = 0; row < 4; row++) {
+                view_array[col * 4 + row] = view_transposed.Elements[row][col];
+                proj_array[col * 4 + row] = proj_transposed.Elements[row][col];
+            }
+        }
 
         // Set orthographic mode (must be called before using gizmo, like in official demo)
         ImGuizmo::SetOrthographic(false);  // We're using perspective projection
