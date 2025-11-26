@@ -532,46 +532,77 @@ bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     const int cubemap_size = 512;
     std::vector<std::vector<float>> cubemap_faces(6);
     
-    // Cubemap face directions
-    HMM_Vec3 face_dirs[6][3] = {
-        {{1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},   // +X
-        {{-1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}},  // -X
-        {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 0.0f}},     // +Y
-        {{0.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 0.0f}},   // -Y
-        {{0.0f, 0.0f, 1.0f}, {0.0f, -1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}},   // +Z
-        {{0.0f, 0.0f, -1.0f}, {0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}}    // -Z
-    };
+    // Standard OpenGL cubemap face layout:
+    // Face 0: +X (right)   - looking in +X direction
+    // Face 1: -X (left)    - looking in -X direction
+    // Face 2: +Y (top)     - looking in +Y direction
+    // Face 3: -Y (bottom)  - looking in -Y direction
+    // Face 4: +Z (front)    - looking in +Z direction
+    // Face 5: -Z (back)    - looking in -Z direction
     
     for (int face = 0; face < 6; ++face) {
         cubemap_faces[face].resize(cubemap_size * cubemap_size * 4);
         
         for (int y = 0; y < cubemap_size; ++y) {
             for (int x = 0; x < cubemap_size; ++x) {
-                // Convert cubemap UV to direction
+                // Convert cubemap UV to direction vector
+                // UV range: [0, 1] -> [-1, 1]
                 float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
-                float v = 1.0f - (y + 0.5f) / cubemap_size * 2.0f;
-                
-                HMM_Vec3 dir = HMM_Add(
-                    HMM_Add(
-                        HMM_MulV3F(face_dirs[face][0], u),
-                        HMM_MulV3F(face_dirs[face][1], v)
-                    ),
-                    face_dirs[face][2]
-                );
+                float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
+
+                HMM_Vec3 dir;
+                // Map UV to direction based on cubemap face
+                // sokol cubemap layout (standard OpenGL-style)
+                switch (face) {
+                    case 0: // +X (right) - positive X axis
+                        // dir = HMM_Vec3{1.0f, v, -u};
+                        dir = HMM_Vec3{-1.0f, v, -u};
+                        break;
+                    case 1: // -X (left) - negative X axis
+                        // dir = HMM_Vec3{-1.0f, v, u};
+                        dir = HMM_Vec3{1.0f, v, u};
+                        break;
+                    case 2: // +Y (top) - positive Y axis
+                        dir = HMM_Vec3{-u, 1.0f, -v};
+                        break;
+                    case 3: // -Y (bottom) - negative Y axis
+                        dir = HMM_Vec3{-u, -1.0f, v};
+                        break;
+                    case 4: // +Z (front) - positive Z axis
+                        dir = HMM_Vec3{-u, v, 1.0f};
+                        break;
+                    case 5: // -Z (back) - negative Z axis
+                        dir = HMM_Vec3{u, v, -1.0f};
+                        break;
+                }
                 dir = HMM_NormV3(dir);
                 
                 // Convert direction to equirectangular UV
-                float theta = atan2f(dir.Z, dir.X);
-                float phi = acosf(dir.Y);
+                // Equirectangular mapping: theta (azimuth) and phi (elevation)
+                float theta = atan2f(dir.Z, dir.X);  // azimuth: [-PI, PI]
+                float phi = acosf(dir.Y);             // elevation: [0, PI]
+                
+                // Normalize to [0, 1]
                 float equirect_u = (theta / (2.0f * 3.14159265359f)) + 0.5f;
                 float equirect_v = phi / 3.14159265359f;
                 
+                // Clamp to valid range
+                if (equirect_u < 0.0f) equirect_u = 0.0f;
+                if (equirect_u > 1.0f) equirect_u = 1.0f;
+                if (equirect_v < 0.0f) equirect_v = 0.0f;
+                if (equirect_v > 1.0f) equirect_v = 1.0f;
+                
                 // Sample from equirectangular map
-                int src_x = (int)(equirect_u * width) % width;
-                int src_y = (int)(equirect_v * height) % height;
+                int src_x = (int)(equirect_u * width);
+                int src_y = (int)(equirect_v * height);
+                if (src_x >= width) src_x = width - 1;
+                if (src_y >= height) src_y = height - 1;
                 int src_idx = (src_y * width + src_x) * 4;
                 
-                int dst_idx = (y * cubemap_size + x) * 4;
+                // Flip Y coordinate when writing to cubemap to match sokol's image coordinate system
+                // sokol uses top-left origin, so we need to flip Y
+                int dst_y = cubemap_size - 1 - y;
+                int dst_idx = (dst_y * cubemap_size + x) * 4;
                 cubemap_faces[face][dst_idx + 0] = rgba_data[src_idx + 0];
                 cubemap_faces[face][dst_idx + 1] = rgba_data[src_idx + 1];
                 cubemap_faces[face][dst_idx + 2] = rgba_data[src_idx + 2];
@@ -783,7 +814,7 @@ void init(void) {
     g_state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
     
     // Load HDR and create cubemap
-    std::string hdr_path = "assets/hdr/piazza_bologni_1k.hdr";
+    std::string hdr_path = "assets/hdr/modern_evening_street_2k.hdr";
     if (LoadHDRAndCreateCubemap(hdr_path)) {
         g_state.ibl_initialized = true;
         std::cout << "IBL initialized successfully" << std::endl;
