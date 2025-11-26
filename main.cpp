@@ -555,11 +555,9 @@ bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
                 // sokol cubemap layout (standard OpenGL-style)
                 switch (face) {
                     case 0: // +X (right) - positive X axis
-                        // dir = HMM_Vec3{1.0f, v, -u};
                         dir = HMM_Vec3{-1.0f, v, -u};
                         break;
                     case 1: // -X (left) - negative X axis
-                        // dir = HMM_Vec3{-1.0f, v, u};
                         dir = HMM_Vec3{1.0f, v, u};
                         break;
                     case 2: // +Y (top) - positive Y axis
