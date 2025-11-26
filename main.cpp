@@ -176,7 +176,7 @@ bool LoadVMDMotion(const std::string& filename) {
     }
 }
 
-// Update model vertex buffers
+// Update model vertex buffers (initial creation)
 void UpdateModelBuffers() {
     if (!g_state.model || !g_state.model_loaded) return;
     
@@ -226,22 +226,22 @@ void UpdateModelBuffers() {
         indices.push_back(triangle.v[0]);
     }
     
-    // Create vertex buffer
+    // Create vertex buffer with dynamic usage for animation updates
+    // For stream_update buffers, we must not provide initial data
+    // Initial data will be uploaded in UpdateDeformedVertices() on first frame
     sg_buffer_desc vbuf_desc = {};
-    // vbuf_desc.data = SG_RANGE(vertices);
-    vbuf_desc.data.ptr = vertices.data();
-    vbuf_desc.data.size = vertices.size() * sizeof(Vertex);
+    vbuf_desc.size = vertices.size() * sizeof(Vertex);
+    vbuf_desc.usage.stream_update = true;  // Enable dynamic updates for animation
     vbuf_desc.label = "model-vertices";
     g_state.vertex_buffer = sg_make_buffer(&vbuf_desc);
     
-    // Create index buffer
+    // Create index buffer (static, doesn't change)
     if (indices.empty()) {
         std::cerr << "Error: Index data is empty!" << std::endl;
         return;
     }
     sg_buffer_desc ibuf_desc = {};
     ibuf_desc.usage.index_buffer = true;
-    // ibuf_desc.data = SG_RANGE(indices);
     ibuf_desc.data.ptr = indices.data();
     ibuf_desc.data.size = indices.size() * sizeof(uint32_t);
     ibuf_desc.label = "model-indices";
@@ -255,6 +255,46 @@ void UpdateModelBuffers() {
     // Update bindings
     g_state.bind.vertex_buffers[0] = g_state.vertex_buffer;
     g_state.bind.index_buffer = g_state.index_buffer;
+}
+
+// Update vertex buffer with deformed vertices (called each frame after Deform())
+void UpdateDeformedVertices() {
+    if (!g_state.model || !g_state.model_loaded || !g_state.poser || g_state.vertex_buffer.id == 0) {
+        return;
+    }
+    
+    size_t vertex_num = g_state.model->GetVertexNum();
+    if (vertex_num == 0 || g_state.poser->pose_image.coordinates.size() < vertex_num) {
+        return;
+    }
+    
+    // Prepare vertex data from deformed coordinates
+    std::vector<Vertex> vertices;
+    vertices.reserve(vertex_num);
+    
+    for (size_t i = 0; i < vertex_num; ++i) {
+        mmd::Model::Vertex<mmd::ref> vertex = g_state.model->GetVertex(i);
+        mmd::Vector2f uv = vertex.GetUVCoordinate();
+        
+        // Use deformed coordinates and normals from pose_image
+        const mmd::Vector3f& pos = g_state.poser->pose_image.coordinates[i];
+        const mmd::Vector3f& normal = g_state.poser->pose_image.normals[i];
+        
+        Vertex v;
+        v.pos[0] = pos.p.x;
+        v.pos[1] = pos.p.y;
+        v.pos[2] = pos.p.z;
+        v.normal[0] = normal.p.x;
+        v.normal[1] = normal.p.y;
+        v.normal[2] = normal.p.z;
+        v.uv[0] = uv.v[0];
+        v.uv[1] = uv.v[1];
+        
+        vertices.push_back(v);
+    }
+    
+    // Update vertex buffer with deformed data
+    sg_update_buffer(g_state.vertex_buffer, sg_range{vertices.data(), vertices.size() * sizeof(Vertex)});
 }
 
 // Initialization function
@@ -397,15 +437,23 @@ void frame(void) {
     // Draw sokol-gfx debug windows
     sgimgui_draw(&g_state.sgimgui);
     
-    // Update animation
-    if (g_state.model_loaded && g_state.motion_loaded && g_state.motion_player && g_state.poser) {
-        // Calculate current frame (assuming 30 FPS)
-        size_t frame = static_cast<size_t>(g_state.time * 30.0f);
+    // Update animation and deformed vertices
+    // Ensure Deform() is called before UpdateDeformedVertices() to populate pose_image
+    if (g_state.model_loaded && g_state.poser) {
+        if (g_state.motion_loaded && g_state.motion_player) {
+            // Calculate current frame (assuming 30 FPS)
+            size_t frame = static_cast<size_t>(g_state.time * 30.0f);
+            
+            // Seek to current frame and apply motion
+            g_state.motion_player->SeekFrame(frame);
+        }
         
-        // Seek to current frame and apply motion
-        g_state.motion_player->SeekFrame(frame);
+        // Apply posing and deformation (even without motion, to get initial pose)
         g_state.poser->ResetPosing();
         g_state.poser->Deform();
+        
+        // Update vertex buffer with deformed vertices (only once per frame)
+        UpdateDeformedVertices();
     }
     
     // Handle continuous keyboard input for camera movement (WASD)
