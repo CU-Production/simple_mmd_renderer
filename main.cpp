@@ -202,7 +202,9 @@ struct {
     
     // Material textures (map from material index to texture image)
     std::vector<sg_image> material_textures;
+    std::vector<sg_view> material_texture_views; // Persistent views for material textures
     sg_image default_texture = {0}; // White 1x1 texture for materials without texture
+    sg_view default_texture_view = {0}; // Persistent view for default texture
 } g_state;
 
 
@@ -486,6 +488,17 @@ sg_image LoadTexture(const std::wstring& texture_path, const std::wstring& model
         return g_state.default_texture;
     }
     
+    // Extract filename for label (use just the filename, not full path)
+    std::string label = path_utf8;
+    size_t last_slash = label.find_last_of("\\/");
+    if (last_slash != std::string::npos && last_slash + 1 < label.length()) {
+        label = label.substr(last_slash + 1);
+    }
+    // Limit label length to avoid issues
+    if (label.length() > 64) {
+        label = label.substr(0, 64);
+    }
+    
     sg_image_desc img_desc = {};
     img_desc.type = SG_IMAGETYPE_2D;
     img_desc.width = width;
@@ -493,7 +506,7 @@ sg_image LoadTexture(const std::wstring& texture_path, const std::wstring& model
     img_desc.num_mipmaps = 1;
     img_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
     img_desc.usage.immutable = true;
-    img_desc.label = "material-texture";
+    img_desc.label = label.c_str();
     img_desc.data.mip_levels[0].ptr = data;
     img_desc.data.mip_levels[0].size = width * height * 4;
     
@@ -538,13 +551,17 @@ void LoadMaterialTextures(const std::string& model_filename) {
         return;
     }
     
-    // Clean up old textures
-    for (auto& tex : g_state.material_textures) {
-        if (tex.id != 0 && tex.id != g_state.default_texture.id) {
-            sg_destroy_image(tex);
+    // Clean up old textures and views
+    for (size_t i = 0; i < g_state.material_textures.size(); ++i) {
+        if (g_state.material_textures[i].id != 0 && g_state.material_textures[i].id != g_state.default_texture.id) {
+            sg_destroy_image(g_state.material_textures[i]);
+        }
+        if (i < g_state.material_texture_views.size() && g_state.material_texture_views[i].id != 0) {
+            sg_destroy_view(g_state.material_texture_views[i]);
         }
     }
     g_state.material_textures.clear();
+    g_state.material_texture_views.clear();
     
     // Get model directory from filename (convert to absolute path first)
     std::wstring model_dir;
@@ -568,6 +585,7 @@ void LoadMaterialTextures(const std::string& model_filename) {
     
     size_t part_num = g_state.model->GetPartNum();
     g_state.material_textures.resize(part_num, g_state.default_texture);
+    g_state.material_texture_views.resize(part_num, g_state.default_texture_view);
     
     for (size_t i = 0; i < part_num; ++i) {
         const mmd::Model::Part& part = g_state.model->GetPart(i);
@@ -580,9 +598,16 @@ void LoadMaterialTextures(const std::string& model_filename) {
             if (i < 3) {
                 std::cout << "Loading texture " << i << ": " << wstring_to_utf8(texture_path) << std::endl;
             }
-            g_state.material_textures[i] = LoadTexture(texture_path, model_dir);
+            sg_image loaded_tex = LoadTexture(texture_path, model_dir);
+            g_state.material_textures[i] = loaded_tex;
+            
+            // Create persistent view for this texture
+            sg_view_desc view_desc = {};
+            view_desc.texture.image = loaded_tex;
+            g_state.material_texture_views[i] = sg_make_view(&view_desc);
         } else {
             g_state.material_textures[i] = g_state.default_texture;
+            g_state.material_texture_views[i] = g_state.default_texture_view;
         }
     }
     
@@ -1412,6 +1437,11 @@ void init(void) {
     default_tex_desc.data.mip_levels[0].size = 4;
     g_state.default_texture = sg_make_image(&default_tex_desc);
     
+    // Create persistent view for default texture
+    sg_view_desc default_view_desc = {};
+    default_view_desc.texture.image = g_state.default_texture;
+    g_state.default_texture_view = sg_make_view(&default_view_desc);
+    
     // Create skybox shader and pipeline
     sg_shader skybox_shd = sg_make_shader(ibl_skybox_shader_desc(sg_query_backend()));
     sg_pipeline_desc skybox_pip_desc = {};
@@ -1899,17 +1929,14 @@ void frame(void) {
             bind.vertex_buffers[0] = g_state.vertex_buffer;
             bind.index_buffer = g_state.index_buffer;
             
-            // Bind material texture (slot 2 for diffuse texture)
-            sg_image material_tex = (part_idx < g_state.material_textures.size()) 
-                ? g_state.material_textures[part_idx] 
-                : g_state.default_texture;
-            
-            sg_view_desc material_view_desc = {};
-            material_view_desc.texture.image = material_tex;
-            sg_view material_view = sg_make_view(&material_view_desc);
+            // Use persistent view for material texture (slot 2 for diffuse texture)
+            sg_view material_view = (part_idx < g_state.material_texture_views.size() && g_state.material_texture_views[part_idx].id != 0)
+                ? g_state.material_texture_views[part_idx]
+                : g_state.default_texture_view;
             
             // Bind textures: slot 0=irradiance, slot 1=prefilter, slot 2=diffuse texture
             if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
+                // Create views for IBL textures (these are created each frame as they're not material textures)
                 sg_view_desc irradiance_view_desc = {};
                 irradiance_view_desc.texture.image = g_state.irradiance_map;
                 sg_view irradiance_view = sg_make_view(&irradiance_view_desc);
@@ -1948,8 +1975,6 @@ void frame(void) {
                 sg_apply_uniforms(0, SG_RANGE(vs_params));
                 sg_apply_uniforms(3, SG_RANGE(fs_params_no_ibl));
             }
-            
-            sg_destroy_view(material_view);
             
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);
@@ -2100,11 +2125,17 @@ void cleanup(void) {
     if (g_state.default_sampler.id != 0) {
         sg_destroy_sampler(g_state.default_sampler);
     }
-    // Clean up material textures
-    for (auto& tex : g_state.material_textures) {
-        if (tex.id != 0 && tex.id != g_state.default_texture.id) {
-            sg_destroy_image(tex);
+    // Clean up material textures and views
+    for (size_t i = 0; i < g_state.material_textures.size(); ++i) {
+        if (g_state.material_textures[i].id != 0 && g_state.material_textures[i].id != g_state.default_texture.id) {
+            sg_destroy_image(g_state.material_textures[i]);
         }
+        if (i < g_state.material_texture_views.size() && g_state.material_texture_views[i].id != 0) {
+            sg_destroy_view(g_state.material_texture_views[i]);
+        }
+    }
+    if (g_state.default_texture_view.id != 0) {
+        sg_destroy_view(g_state.default_texture_view);
     }
     if (g_state.default_texture.id != 0) {
         sg_destroy_image(g_state.default_texture);

@@ -64,10 +64,11 @@ void main() {
     
     // For test mode: use normal as color (when normal contains color data)
     // For model mode: use IBL lighting
-    if (norm.x > 0.5f || norm.y > 0.5f || norm.z > 0.5f) {
-        // Likely color data, use directly
-        frag_color = vec4(norm, 1.0);
-    } else {
+//    if (norm.x > 0.5f || norm.y > 0.5f || norm.z > 0.5f) {
+//        // Likely color data, use directly
+//        frag_color = vec4(norm, 1.0);
+//    } else
+    {
         // Likely normal data, use IBL lighting with texture
         // Sample diffuse texture
         vec3 albedo = texture(sampler2D(diffuse_texture, diffuse_smp), uv).rgb;
