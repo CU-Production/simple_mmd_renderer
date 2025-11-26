@@ -203,9 +203,10 @@ void UpdateModelBuffers() {
     
     for (size_t i = 0; i < triangle_num; ++i) {
         const mmd::Vector3D<std::uint32_t>& triangle = g_state.model->GetTriangle(i);
-        indices.push_back(triangle.v[0]);
-        indices.push_back(triangle.v[1]);
+        // workaround for backface culling
         indices.push_back(triangle.v[2]);
+        indices.push_back(triangle.v[1]);
+        indices.push_back(triangle.v[0]);
     }
     
     // Create vertex buffer
@@ -262,7 +263,7 @@ void init(void) {
     
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
-    // _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
+    _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     _sg_pipeline_desc.label = "model-pipeline";
