@@ -136,7 +136,7 @@ struct {
     std::unique_ptr<mmd::BulletPhysicsReactor> physics_reactor;
     bool physics_enabled = true;  // Enable physics simulation by default
     bool physics_window_open = false;  // Physics control window visibility
-    
+
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
     
@@ -1646,7 +1646,7 @@ void frame(void) {
             ImGui::Text("Bullet Physics Engine");
             ImGui::Separator();
             
-            // Enable/disable physics
+            // Enable/disable physics (only if not cleaning up)
             if (ImGui::Checkbox("Enable Physics", &g_state.physics_enabled)) {
                 if (!g_state.physics_enabled && g_state.physics_reactor && g_state.poser) {
                     // Reset physics when disabling
@@ -1814,7 +1814,7 @@ void frame(void) {
             // but after SeekFrame() we need to update transforms again
             g_state.poser->PrePhysicsPosing();
             
-            // Run physics simulation if enabled
+            // Run physics simulation if enabled and not cleaning up
             if (g_state.physics_enabled && g_state.physics_reactor) {
                 // Step physics simulation (dt is in seconds, MMD uses 30 FPS = 1/30 second per frame)
                 const float physics_dt = 1.0f / 30.0f;
@@ -2322,6 +2322,10 @@ void frame(void) {
 
 // Cleanup function
 void cleanup(void) {
+    if (g_state.physics_reactor->IsHasFloor()) {
+        g_state.physics_reactor->SetFloor(false);
+    }
+    
     if (g_state.vertex_buffer.id != 0) {
         sg_destroy_buffer(g_state.vertex_buffer);
     }
