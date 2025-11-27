@@ -26,9 +26,7 @@ void main() {
     world_pos = world_pos4.xyz;
     gl_Position = mvp * vec4(position, 1.0);
     light_space_pos = light_mvp * vec4(position, 1.0); // Transform to light space
-//#if !SOKOL_GLSL
-    light_space_pos.y = -light_space_pos.y;
-//#endif
+    // Note: Y-flip is handled in CalculateShadow after perspective divide for correct UV coordinates
     uv = texcoord0;
     norm = mat3(transpose(inverse(model))) * normal; // Transform normal to world space
 }
@@ -76,9 +74,16 @@ vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 float CalculateShadow(vec4 light_space_pos) {
     // Perspective divide
     vec3 proj_coords = light_space_pos.xyz / light_space_pos.w;
+    
     // Transform from [-1,1] to [0,1] range for texture sampling
     proj_coords = proj_coords * 0.5 + 0.5;
-    
+
+    // Handle Y-flip for D3D11/Metal (after perspective divide, before UV transform)
+    // In D3D11/Metal, Y coordinate needs to be flipped for correct texture sampling
+#if !SOKOL_GLSL
+    proj_coords.y = 1.0 - proj_coords.y;
+#endif
+
     // Check if fragment is outside light frustum
     if (proj_coords.x < 0.0 || proj_coords.x > 1.0 || 
         proj_coords.y < 0.0 || proj_coords.y > 1.0 ||
@@ -86,9 +91,16 @@ float CalculateShadow(vec4 light_space_pos) {
         return 1.0; // Not in shadow (outside light frustum)
     }
     
+    // Clamp coordinates to valid range to prevent sampling issues
+    proj_coords.xy = clamp(proj_coords.xy, 0.0, 1.0);
+    
     // Apply shadow bias to prevent shadow acne
-    float bias = 0.005;
+    float bias = 0.001;
+#if !SOKOL_GLSL
     float shadow_depth = proj_coords.z - bias;
+#else
+    float shadow_depth = proj_coords.z + bias;
+#endif
     
     // Calculate texel size for PCF
     vec2 texel_size = 1.0 / vec2(textureSize(sampler2D(shadow_map, shadow_smp), 0));
@@ -157,7 +169,7 @@ void main() {
         vec3 L = normalize(-light_direction); // Light direction points towards light
         float NdotL = max(dot(N, L), 0.0);
         vec3 directional_light = light_color * light_intensity * NdotL * shadow;
-        
+
         if (ibl_strength > 0.0) {
             // Use IBL lighting with directional light
             vec3 R = reflect(-V, N);
@@ -196,6 +208,8 @@ void main() {
             vec3 diffuse_color = albedo * directional_light; // Diffuse with shadow
             frag_color = vec4(ambient_color + diffuse_color, 1.0);
         }
+
+        frag_color = vec4(albedo, 1.0f) * shadow;
     }
 }
 @end
