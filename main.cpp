@@ -234,7 +234,8 @@ struct {
     float light_intensity = 1.0f;
     bool shadows_enabled = true;
     bool light_window_open = false;
-    
+    bool material_window_open = false;
+
     // Figure/Resin material parameters
     float rim_power = 2.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
     float rim_intensity = 0.2f; // Rim light intensity (typical: 0.5-2.0)
@@ -1524,8 +1525,9 @@ void frame(void) {
             ImGui::MenuItem("Show Skybox", nullptr, &g_state.show_skybox);
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Light")) {
+        if (ImGui::BeginMenu("Render")) {
             ImGui::MenuItem("Light Controls", nullptr, &g_state.light_window_open);
+            ImGui::MenuItem("Materials", nullptr, &g_state.material_window_open);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Physics")) {
@@ -1608,11 +1610,15 @@ void frame(void) {
             
             ImGui::Separator();
             ImGui::Checkbox("Enable Shadows", &g_state.shadows_enabled);
-            
-            ImGui::Separator();
+        }
+        ImGui::End();
+    }
+
+    if (g_state.material_window_open) {
+        if (ImGui::Begin("Materials", &g_state.material_window_open)) {
             ImGui::Text("MMD Material");
             ImGui::Separator();
-            
+
             // Rim light parameters
             ImGui::Text("Rim Light (Edge Highlight):");
             ImGui::DragFloat("Rim Power", &g_state.rim_power, 0.1f, 1.0f, 10.0f);
@@ -1621,19 +1627,19 @@ void frame(void) {
             if (ImGui::ColorEdit3("Rim Color", rim_col)) {
                 g_state.rim_color = HMM_Vec3{rim_col[0], rim_col[1], rim_col[2]};
             }
-            
+
             ImGui::Separator();
-            
+
             // Specular highlight parameters
             ImGui::Text("Specular Highlight:");
             ImGui::DragFloat("Specular Power", &g_state.specular_power, 1.0f, 1.0f, 256.0f);
             ImGui::DragFloat("Specular Intensity", &g_state.specular_intensity, 0.1f, 0.0f, 3.0f);
-            
+
             ImGui::Separator();
             ImGui::Text("Light Info:");
-            ImGui::Text("Direction: (%.3f, %.3f, %.3f)", 
+            ImGui::Text("Direction: (%.3f, %.3f, %.3f)",
                 g_state.light_direction.X, g_state.light_direction.Y, g_state.light_direction.Z);
-            ImGui::Text("Color: (%.3f, %.3f, %.3f)", 
+            ImGui::Text("Color: (%.3f, %.3f, %.3f)",
                 g_state.light_color.X, g_state.light_color.Y, g_state.light_color.Z);
             ImGui::Text("Intensity: %.2f", g_state.light_intensity);
         }
