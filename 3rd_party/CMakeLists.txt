@@ -34,3 +34,11 @@ target_include_directories(stb INTERFACE stb)
 
 # nfd
 add_subdirectory(nativefiledialog-extended)
+
+# bullet
+option(BUILD_BULLET2_DEMOS OFF)
+option(BUILD_CPU_DEMOS OFF)
+option(BUILD_EXTRAS OFF)
+option(BUILD_OPENGL3_DEMOS OFF)
+option(BUILD_UNIT_TESTS OFF)
+add_subdirectory(bullet)
