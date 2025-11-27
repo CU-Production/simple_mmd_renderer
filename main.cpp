@@ -1363,7 +1363,7 @@ void init(void) {
     // Initialize shadow mapping
     InitializeShadowMapping();
     
-    // Create ground pipeline (uses dedicated ground shader with IBL and shadows)
+    // Create ground pipeline (uses dedicated ground shader with shadows)
     sg_shader ground_shd = sg_make_shader(ground_ground_shader_desc(sg_query_backend()));
     sg_pipeline_desc ground_pip_desc = {};
     ground_pip_desc.shader = ground_shd;
@@ -1379,7 +1379,7 @@ void init(void) {
     ground_pip_desc.label = "ground-pipeline";
     g_state.ground_pip = sg_make_pipeline(&ground_pip_desc);
     
-    // Create default sampler for IBL and textures
+    // Create default sampler for textures
     sg_sampler_desc sampler_desc = {};
     sampler_desc.min_filter = SG_FILTER_LINEAR;
     sampler_desc.mag_filter = SG_FILTER_LINEAR;
@@ -2079,7 +2079,7 @@ void frame(void) {
         }
     }
     
-    // Draw ground plane (white stage) - uses dedicated shader with IBL and shadows
+    // Draw ground plane (white stage) - uses dedicated shader with shadows
     if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
         sg_apply_pipeline(g_state.ground_pip);
         
