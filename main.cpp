@@ -924,8 +924,7 @@ void InitializeShadowMapping() {
     shadow_pip_desc.depth.write_enabled = true;
     shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     shadow_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;
-    // shadow_pip_desc.cull_mode = SG_CULLMODE_FRONT;
-    shadow_pip_desc.cull_mode = SG_CULLMODE_NONE;
+    shadow_pip_desc.cull_mode = SG_CULLMODE_FRONT; // render back-faces in shadow pass to prevent shadow acne on front-faces
     shadow_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     shadow_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
     shadow_pip_desc.label = "shadow-pipeline";
