@@ -57,6 +57,7 @@ layout(binding=4) uniform fs_params {
     vec3 light_color; // Directional light color
     float light_intensity; // Directional light intensity
     float shadows_enabled; // Whether shadows are enabled
+    float receive_shadows; // Whether this object receives shadows (1.0 = yes, 0.0 = no)
 };
 
 const float PI = 3.14159265359;
@@ -160,8 +161,9 @@ void main() {
         vec3 albedo = texture(sampler2D(diffuse_texture, diffuse_smp), uv).rgb;
         
         // Calculate shadow factor
+        // Only calculate shadow if shadows are enabled AND this object receives shadows
         float shadow = 1.0;
-        if (shadows_enabled > 0.5) {
+        if (shadows_enabled > 0.5 && receive_shadows > 0.5) {
             shadow = CalculateShadow(light_space_pos);
         }
         
@@ -170,7 +172,9 @@ void main() {
         float NdotL = max(dot(N, L), 0.0);
         vec3 directional_light = light_color * light_intensity * NdotL * shadow;
 
-        if (ibl_strength > 0.0) {
+        if (ibl_strength > 0.0)
+//            if (false)
+        {
             // Use IBL lighting with directional light
             vec3 R = reflect(-V, N);
             
@@ -208,8 +212,6 @@ void main() {
             vec3 diffuse_color = albedo * directional_light; // Diffuse with shadow
             frag_color = vec4(ambient_color + diffuse_color, 1.0);
         }
-
-        frag_color = vec4(albedo, 1.0f) * shadow;
     }
 }
 @end

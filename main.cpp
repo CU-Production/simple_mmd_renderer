@@ -2270,6 +2270,7 @@ void frame(void) {
         fs_params.light_color = g_state.light_color;
         fs_params.light_intensity = g_state.light_intensity;
         fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
+        fs_params.receive_shadows = 0.0f; // MMD models don't receive shadows (cleaner look)
         
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
@@ -2322,6 +2323,7 @@ void frame(void) {
                 fs_params_no_ibl.light_color = g_state.light_color;
                 fs_params_no_ibl.light_intensity = g_state.light_intensity;
                 fs_params_no_ibl.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
+                fs_params_no_ibl.receive_shadows = 0.0f; // MMD models don't receive shadows (cleaner look)
                 
                 sg_apply_bindings(&bind);
                 sg_apply_uniforms(0, SG_RANGE(vs_params));
@@ -2361,6 +2363,7 @@ void frame(void) {
         ground_fs_params.light_color = g_state.light_color;
         ground_fs_params.light_intensity = g_state.light_intensity;
         ground_fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
+        ground_fs_params.receive_shadows = 1.0f; // Ground receives shadows
         
         sg_bindings ground_bind = {};
         ground_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
