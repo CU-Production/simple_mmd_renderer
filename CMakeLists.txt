@@ -133,7 +133,7 @@ include_directories(${CMAKE_BINARY_DIR})
 add_executable(simple_mmd_renderer main.cpp)
 add_dependencies(simple_mmd_renderer shader_header)
 # Add Bullet include directory (Bullet headers are in src directory)
-target_include_directories(simple_mmd_renderer PRIVATE 
+target_include_directories(simple_mmd_renderer PRIVATE
     ${CMAKE_SOURCE_DIR}/3rd_party/bullet/src
 )
 target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui imguizmo mmd sokol stb nfd

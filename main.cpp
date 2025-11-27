@@ -947,6 +947,7 @@ void InitializeShadowMapping() {
     shadow_pip_desc.cull_mode = SG_CULLMODE_FRONT; // render back-faces in shadow pass to prevent shadow acne on front-faces
     shadow_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     shadow_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    shadow_pip_desc.sample_count = 1;  // Shadow map doesn't need MSAA, keep it at 1
     shadow_pip_desc.label = "shadow-pipeline";
     // No color output for shadow pass
     // shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_NONE;
@@ -969,6 +970,7 @@ void InitializeShadowMapping() {
     dummy_color_desc.num_mipmaps = 1;
     dummy_color_desc.pixel_format = SG_PIXELFORMAT_R8;
     dummy_color_desc.usage.color_attachment = true;
+    dummy_color_desc.sample_count = 1;  // Shadow map doesn't need MSAA, keep it at 1
     dummy_color_desc.label = "shadow-dummy-color";
     g_state.shadow_dummy_color = sg_make_image(&dummy_color_desc);
     
@@ -1315,6 +1317,7 @@ void init(void) {
     // Setup ImGui
     simgui_desc_t _simgui_desc = {};
     _simgui_desc.logger.func = slog_func;
+    _simgui_desc.sample_count = 4;
     simgui_setup(&_simgui_desc);
     
     // Setup sokol-gfx ImGui debug UI
@@ -1339,6 +1342,7 @@ void init(void) {
     _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    _sg_pipeline_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
     _sg_pipeline_desc.label = "model-pipeline";
 
     g_state.pip = sg_make_pipeline(&_sg_pipeline_desc);
@@ -1375,6 +1379,7 @@ void init(void) {
     ground_pip_desc.cull_mode = SG_CULLMODE_BACK;
     ground_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     ground_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    ground_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
     ground_pip_desc.label = "ground-pipeline";
     g_state.ground_pip = sg_make_pipeline(&ground_pip_desc);
     
@@ -1416,6 +1421,7 @@ void init(void) {
     skybox_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     skybox_pip_desc.cull_mode = SG_CULLMODE_FRONT;
     skybox_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
+    skybox_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
     skybox_pip_desc.label = "skybox-pipeline";
     g_state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
     
@@ -2042,7 +2048,7 @@ void frame(void) {
         _shadow_pass.label = "_shadow_pass";
         sg_begin_pass(&_shadow_pass);
         sg_apply_pipeline(g_state.shadow_pip);
-        
+
         // Render model to shadow map
         if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
             shadow_vs_params_t shadow_vs_params;
@@ -2532,6 +2538,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     _sapp_desc.event_cb = input;
     _sapp_desc.width = 1280;
     _sapp_desc.height = 720;
+    _sapp_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
     _sapp_desc.window_title = "Simple MMD Renderer";
     _sapp_desc.logger.func = slog_func;
     return _sapp_desc;
