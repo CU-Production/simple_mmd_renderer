@@ -20,6 +20,7 @@
 #include "ImSequencer.h"
 
 #include "mmd/mmd.hxx"
+#include "mmd-bullet/mmd-bullet.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
 #include "shader/ground.glsl.h"
@@ -132,6 +133,9 @@ struct {
     std::shared_ptr<mmd::Motion> motion;
     std::unique_ptr<mmd::Poser> poser;
     std::unique_ptr<mmd::MotionPlayer> motion_player;
+    std::unique_ptr<mmd::BulletPhysicsReactor> physics_reactor;
+    bool physics_enabled = true;  // Enable physics simulation by default
+    bool physics_window_open = false;  // Physics control window visibility
     
     sg_buffer vertex_buffer = {0};
     sg_buffer index_buffer = {0};
@@ -661,6 +665,16 @@ bool LoadPMXModel(const std::string& filename) {
         // Create poser for the model
         if (g_state.model) {
             g_state.poser = std::make_unique<mmd::Poser>(*g_state.model);
+            
+            // Initialize physics engine
+            g_state.physics_reactor = std::make_unique<mmd::BulletPhysicsReactor>();
+            if (g_state.physics_reactor && g_state.poser) {
+                g_state.physics_reactor->AddPoser(*g_state.poser);
+                std::cout << "  Physics engine initialized" << std::endl;
+                std::cout << "  Rigid bodies: " << g_state.model->GetRigidBodyNum() << std::endl;
+                std::cout << "  Constraints: " << g_state.model->GetConstraintNum() << std::endl;
+            }
+            
             // Create motion player if motion is already loaded
             if (g_state.motion && g_state.poser) {
                 g_state.motion_player = std::make_unique<mmd::MotionPlayer>(*g_state.motion, *g_state.poser);
@@ -1514,6 +1528,10 @@ void frame(void) {
             ImGui::MenuItem("Light Controls", nullptr, &g_state.light_window_open);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Physics")) {
+            ImGui::MenuItem("Physics Controls", nullptr, &g_state.physics_window_open);
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Tools")) {
             ImGui::MenuItem("Model Transform (ImGuizmo)", nullptr, &g_state.guizmo_enabled);
             ImGui::MenuItem("Animation Sequencer", nullptr, &g_state.sequencer_enabled);
@@ -1622,6 +1640,75 @@ void frame(void) {
         ImGui::End();
     }
     
+    // Draw physics control window
+    if (g_state.physics_window_open) {
+        if (ImGui::Begin("Physics Controls", &g_state.physics_window_open)) {
+            ImGui::Text("Bullet Physics Engine");
+            ImGui::Separator();
+            
+            // Enable/disable physics
+            if (ImGui::Checkbox("Enable Physics", &g_state.physics_enabled)) {
+                if (!g_state.physics_enabled && g_state.physics_reactor && g_state.poser) {
+                    // Reset physics when disabling
+                    g_state.physics_reactor->Reset();
+                }
+            }
+            
+            if (g_state.physics_reactor) {
+                ImGui::Separator();
+                ImGui::Text("Gravity Settings");
+                
+                // Gravity strength
+                float gravity_strength = g_state.physics_reactor->GetGravityStrength();
+                if (ImGui::DragFloat("Gravity Strength", &gravity_strength, 0.1f, 0.0f, 50.0f)) {
+                    g_state.physics_reactor->SetGravityStrength(gravity_strength);
+                }
+                
+                // Gravity direction
+                mmd::Vector3f gravity_dir = g_state.physics_reactor->GetGravityDirection();
+                float gravity_dir_array[3] = {gravity_dir.p.x, gravity_dir.p.y, gravity_dir.p.z};
+                if (ImGui::DragFloat3("Gravity Direction", gravity_dir_array, 0.01f, -1.0f, 1.0f)) {
+                    mmd::Vector3f new_dir;
+                    new_dir.p.x = gravity_dir_array[0];
+                    new_dir.p.y = gravity_dir_array[1];
+                    new_dir.p.z = gravity_dir_array[2];
+                    g_state.physics_reactor->SetGravityDirection(new_dir);
+                }
+                
+                ImGui::Separator();
+                
+                // Floor settings
+                bool has_floor = g_state.physics_reactor->IsHasFloor();
+                if (ImGui::Checkbox("Enable Floor", &has_floor)) {
+                    g_state.physics_reactor->SetFloor(has_floor);
+                }
+                
+                ImGui::Separator();
+                
+                // Reset button
+                if (ImGui::Button("Reset Physics")) {
+                    if (g_state.physics_reactor) {
+                        g_state.physics_reactor->Reset();
+                    }
+                }
+                
+                ImGui::Separator();
+                ImGui::Text("Physics Info:");
+                if (g_state.model) {
+                    ImGui::Text("Rigid Bodies: %zu", g_state.model->GetRigidBodyNum());
+                    ImGui::Text("Constraints: %zu", g_state.model->GetConstraintNum());
+                }
+                ImGui::Text("Gravity: %.2f", gravity_strength);
+                ImGui::Text("Direction: (%.3f, %.3f, %.3f)", 
+                    gravity_dir.p.x, gravity_dir.p.y, gravity_dir.p.z);
+            } else {
+                ImGui::Text("Physics engine not initialized.");
+                ImGui::Text("Load a PMX model to enable physics.");
+            }
+        }
+        ImGui::End();
+    }
+    
     // Draw sokol-gfx debug windows
     sgimgui_draw(&g_state.sgimgui);
     
@@ -1726,6 +1813,14 @@ void frame(void) {
             // ResetPosing() already called PrePhysicsPosing() and PostPhysicsPosing(),
             // but after SeekFrame() we need to update transforms again
             g_state.poser->PrePhysicsPosing();
+            
+            // Run physics simulation if enabled
+            if (g_state.physics_enabled && g_state.physics_reactor) {
+                // Step physics simulation (dt is in seconds, MMD uses 30 FPS = 1/30 second per frame)
+                const float physics_dt = 1.0f / 30.0f;
+                g_state.physics_reactor->React(physics_dt);
+            }
+            
             g_state.poser->PostPhysicsPosing();
             
             // // Debug: print frame number every second

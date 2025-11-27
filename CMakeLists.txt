@@ -132,7 +132,13 @@ include_directories(${CMAKE_BINARY_DIR})
 
 add_executable(simple_mmd_renderer main.cpp)
 add_dependencies(simple_mmd_renderer shader_header)
-target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui imguizmo mmd sokol stb nfd)
+# Add Bullet include directory (Bullet headers are in src directory)
+target_include_directories(simple_mmd_renderer PRIVATE 
+    ${CMAKE_SOURCE_DIR}/3rd_party/bullet/src
+)
+target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui imguizmo mmd sokol stb nfd
+    BulletDynamics BulletCollision LinearMath
+)
 add_custom_command(
     TARGET simple_mmd_renderer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ARGS "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets"
