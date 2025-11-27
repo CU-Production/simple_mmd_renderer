@@ -144,10 +144,10 @@ struct {
 
     // Camera parameters
     // Camera settings in meters (MMD models are now converted to meters)
-    HMM_Vec3 camera_pos = {0.0f, 1.6f, 4.0f}; // ~1.6m height (eye level), 4m away
-    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f}; // Look at origin
+    HMM_Vec3 camera_pos = {0.2f, 1.6f, -4.0f}; // ~1.6m height (eye level), 4m away
+    HMM_Vec3 camera_target = {0.0f, 1.1f, 0.0f}; // Look at origin
     float camera_fov = 45.0f;
-    float camera_distance = 4.0f; // 4 meters (typical viewing distance for character)
+    float camera_distance = -4.0f; // 4 meters (typical viewing distance for character)
     float camera_rotation_x = 0.0f;  // Horizontal rotation (around Y axis)
     float camera_rotation_y = 0.0f;  // Vertical rotation (around X axis)
     
@@ -1551,8 +1551,8 @@ void frame(void) {
             ImGui::BulletText("R: Reset camera");
             
             if (ImGui::Button("Reset Camera")) {
-                g_state.camera_pos = HMM_Vec3{0.0f, 1.6f, 4.0f}; // ~1.6m height, 4m away
-                g_state.camera_target = HMM_Vec3{0.0f, 0.0f, 0.0f};
+                g_state.camera_pos = HMM_Vec3{0.0f, 1.6f, -4.0f}; // ~1.6m height, 4m away
+                g_state.camera_target = HMM_Vec3{0.0f, 1.1f, 0.0f};
                 g_state.camera_fov = 45.0f;
                 g_state.camera_distance = 4.0f; // 4 meters
                 g_state.camera_rotation_x = 0.0f;
