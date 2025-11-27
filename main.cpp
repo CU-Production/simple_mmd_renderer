@@ -2127,9 +2127,11 @@ void frame(void) {
     // Render shadow pass first (before main rendering)
     // Use persistent shadow pass (like official demo)
     if (g_state.shadows_enabled && g_state.shadow_map.id != 0) {
+        sg_push_debug_group("Shaodw pass");
         sg_pass _shadow_pass = {0};
         _shadow_pass.action = g_state.shadow_pass_action;
         _shadow_pass.attachments.depth_stencil = g_state.shadow_map_ds_view;
+        _shadow_pass.label = "_shadow_pass";
         sg_begin_pass(&_shadow_pass);
         sg_apply_pipeline(g_state.shadow_pip);
         
@@ -2179,12 +2181,15 @@ void frame(void) {
         // }
         
         sg_end_pass();
+        sg_pop_debug_group();
     }
 
     // Begin main rendering pass
+    sg_push_debug_group("main pass");
     sg_pass _sg_pass{};
     _sg_pass.action = g_state.main_pass_action;
     _sg_pass.swapchain = sglue_swapchain();
+    _sg_pass.label = "main pass";
 
     sg_begin_pass(&_sg_pass);
 
@@ -2357,11 +2362,14 @@ void frame(void) {
     
     // End model rendering pass
     sg_end_pass();
+    sg_pop_debug_group();
     
     // Begin UI pass for ImGui (separate pass, don't clear color buffer)
+    sg_push_debug_group("ui_pass");
     sg_pass ui_pass = {};
     ui_pass.action = g_state.ui_pass_action;
     ui_pass.swapchain = sglue_swapchain();
+    ui_pass.label = "ui_pass";
     sg_begin_pass(&ui_pass);
     
     // Draw ImGuizmo gizmo if enabled
@@ -2466,6 +2474,7 @@ void frame(void) {
     
     // End UI pass
     sg_end_pass();
+    sg_pop_debug_group();
     sg_commit();
 }
 
