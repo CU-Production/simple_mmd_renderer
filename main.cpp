@@ -189,11 +189,9 @@ struct {
     int sequencer_last_frame = -1;  // Track last frame to detect manual changes
     
     // Skybox resources
-    sg_image equirectangular_map = {0};
     sg_image environment_cubemap = {0};
     sg_view environment_cubemap_view = {0}; // Persistent view for environment cubemap
     sg_sampler default_sampler = {0};
-    sg_pipeline equirect_to_cubemap_pip = {0};
     sg_pipeline skybox_pip = {0};
     sg_buffer skybox_vertex_buffer = {0};
     sg_buffer skybox_index_buffer = {0};
@@ -1066,17 +1064,7 @@ bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     }
     
     std::cout << "Loaded HDR image: " << width << "x" << height << " (" << nrComponents << " components)" << std::endl;
-    
-    // Create equirectangular texture (for reference, but we'll convert to cubemap)
-    sg_image_desc equirect_desc = {};
-    equirect_desc.type = SG_IMAGETYPE_2D;
-    equirect_desc.width = width;
-    equirect_desc.height = height;
-    equirect_desc.num_mipmaps = 1;
-    equirect_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    equirect_desc.usage.immutable = true;
-    equirect_desc.label = "equirectangular-hdr";
-    
+
     // Convert to RGBA if needed
     std::vector<float> rgba_data;
     if (nrComponents == 3) {
@@ -1090,10 +1078,6 @@ bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     } else {
         rgba_data.assign(hdr_data, hdr_data + width * height * 4);
     }
-    
-    equirect_desc.data.mip_levels[0].ptr = rgba_data.data();
-    equirect_desc.data.mip_levels[0].size = width * height * 4 * sizeof(float);
-    g_state.equirectangular_map = sg_make_image(&equirect_desc);
     
     // Convert equirectangular to cubemap on CPU
     const int cubemap_size = 512;
@@ -2247,18 +2231,12 @@ void cleanup(void) {
     if (g_state.skybox_vertex_buffer.id != 0) {
         sg_destroy_buffer(g_state.skybox_vertex_buffer);
     }
-    if (g_state.equirectangular_map.id != 0) {
-        sg_destroy_image(g_state.equirectangular_map);
-    }
     if (g_state.environment_cubemap.id != 0) {
         sg_destroy_image(g_state.environment_cubemap);
     }
-
-    // Clean up IBL views
     if (g_state.environment_cubemap_view.id != 0) {
         sg_destroy_view(g_state.environment_cubemap_view);
     }
-
     if (g_state.default_sampler.id != 0) {
         sg_destroy_sampler(g_state.default_sampler);
     }
