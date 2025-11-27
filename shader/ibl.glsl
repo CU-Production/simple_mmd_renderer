@@ -28,8 +28,25 @@ out vec4 frag_color;
 layout(binding=0) uniform textureCube environment_map;
 layout(binding=0) uniform sampler environment_smp;
 
+// ACES Filmic tonemapping (approximation)
+// This provides better visual results than simple Reinhard
+vec3 ACESFilmicToneMap(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() {
-    frag_color = vec4(texture(samplerCube(environment_map, environment_smp), tex_coords).rgb, 1.0);
+    vec3 hdr_color = texture(samplerCube(environment_map, environment_smp), tex_coords).rgb;
+    
+    // Apply ACES Filmic tonemapping for better visual quality
+    // This provides more natural color reproduction and better highlight handling
+    vec3 ldr_color = ACESFilmicToneMap(hdr_color);
+    
+    frag_color = vec4(ldr_color, 1.0);
 }
 @end
 
