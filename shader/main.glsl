@@ -52,6 +52,29 @@ layout(binding=1) uniform fs_params {
     float light_intensity; // Light intensity
 };
 
+float LinearToSrgb(float channel) {
+    if (channel <= 0.0031308f) {
+        return 12.92f * channel;
+    } else {
+        return 1.055f * pow(abs(channel), 1.0f / 2.4f) - 0.055f;
+    }
+}
+
+vec3 LinearToSrgb(vec3 linear) {
+    return vec3(LinearToSrgb(linear.r), LinearToSrgb(linear.g), LinearToSrgb(linear.b));
+}
+
+float SrgbToLinear(float channel) {
+    if (channel <= 0.04045f) {
+        return channel / 12.92f;
+    } else {
+        return pow(abs((channel + 0.055f) / 1.055f), 2.4f);
+    }
+}
+
+vec3 SrgbToLinear(vec3 srgb) {
+    return vec3(SrgbToLinear(srgb.r), SrgbToLinear(srgb.g), SrgbToLinear(srgb.b));
+}
 
 void main() {
     vec3 N = normalize(norm);
@@ -85,7 +108,7 @@ void main() {
      vec3 final_color = albedo + rim_light + specular_highlight;
 
     // gamma
-    // final_color = pow(abs(final_color), vec3(2.2));
+    final_color = SrgbToLinear(final_color);
 
     frag_color = vec4(final_color, 1.0);
 }
