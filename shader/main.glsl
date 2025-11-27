@@ -104,8 +104,13 @@ void main() {
     }
     vec3 specular_highlight = light_color * light_intensity * specular_intensity * specular_factor;
     
-    // Final color: albedo + rim light + specular highlight
-     vec3 final_color = albedo + rim_light + specular_highlight;
+    // Weak diffuse lighting (hardcoded, no shader parameters)
+    // Provides subtle base illumination to prevent overly dark areas
+    const float diffuse_strength = 0.25; // Weak diffuse intensity (hardcoded)
+    vec3 diffuse_light = light_color * light_intensity * diffuse_strength * max(NdotL, 0.0);
+    
+    // Final color: albedo with diffuse lighting + rim light + specular highlight
+    vec3 final_color = albedo * (vec3(0.9) + diffuse_light) + rim_light + specular_highlight;
 
     // gamma
     final_color = SrgbToLinear(final_color);
