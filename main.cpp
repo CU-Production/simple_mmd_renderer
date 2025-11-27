@@ -22,6 +22,7 @@
 #include "mmd/mmd.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
+#include "shader/ground.glsl.h"
 #include "shader/ibl.glsl.h"
 #include "shader/shadow.glsl.h"
 #include "nfd.h"
@@ -237,6 +238,13 @@ struct {
     float light_intensity = 1.0f;
     bool shadows_enabled = true;
     bool light_window_open = false;
+    
+    // Figure/Resin material parameters
+    float rim_power = 3.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
+    float rim_intensity = 1.0f; // Rim light intensity (typical: 0.5-2.0)
+    HMM_Vec3 rim_color = {1.0f, 1.0f, 1.0f}; // Rim light color (white for neutral, can be tinted)
+    float specular_power = 64.0f; // Specular highlight power (higher = sharper, typical: 32.0-128.0)
+    float specular_intensity = 1.0f; // Specular highlight intensity (typical: 0.5-2.0)
 } g_state;
 
 
@@ -1581,13 +1589,14 @@ void init(void) {
     // Initialize shadow mapping
     InitializeShadowMapping();
     
-    // Create ground pipeline (reuses main shader)
+    // Create ground pipeline (uses dedicated ground shader with IBL and shadows)
+    sg_shader ground_shd = sg_make_shader(ground_ground_shader_desc(sg_query_backend()));
     sg_pipeline_desc ground_pip_desc = {};
-    ground_pip_desc.shader = shd; // Reuse main shader
+    ground_pip_desc.shader = ground_shd;
     ground_pip_desc.layout.buffers[0].stride = sizeof(Vertex);
-    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
-    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_normal] = { .offset = sizeof(float) * 3, .format = SG_VERTEXFORMAT_FLOAT3 };
-    ground_pip_desc.layout.attrs[ATTR_mmd_mmd_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
+    ground_pip_desc.layout.attrs[ATTR_ground_ground_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
+    ground_pip_desc.layout.attrs[ATTR_ground_ground_normal] = { .offset = sizeof(float) * 3, .format = SG_VERTEXFORMAT_FLOAT3 };
+    ground_pip_desc.layout.attrs[ATTR_ground_ground_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
     ground_pip_desc.depth.write_enabled = true;
     ground_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     ground_pip_desc.cull_mode = SG_CULLMODE_BACK;
@@ -1832,6 +1841,26 @@ void frame(void) {
             
             ImGui::Separator();
             ImGui::Checkbox("Enable Shadows", &g_state.shadows_enabled);
+            
+            ImGui::Separator();
+            ImGui::Text("Figure/Resin Material");
+            ImGui::Separator();
+            
+            // Rim light parameters
+            ImGui::Text("Rim Light (Edge Highlight):");
+            ImGui::DragFloat("Rim Power", &g_state.rim_power, 0.1f, 1.0f, 10.0f);
+            ImGui::DragFloat("Rim Intensity", &g_state.rim_intensity, 0.1f, 0.0f, 3.0f);
+            float rim_col[3] = {g_state.rim_color.X, g_state.rim_color.Y, g_state.rim_color.Z};
+            if (ImGui::ColorEdit3("Rim Color", rim_col)) {
+                g_state.rim_color = HMM_Vec3{rim_col[0], rim_col[1], rim_col[2]};
+            }
+            
+            ImGui::Separator();
+            
+            // Specular highlight parameters
+            ImGui::Text("Specular Highlight:");
+            ImGui::DragFloat("Specular Power", &g_state.specular_power, 1.0f, 1.0f, 256.0f);
+            ImGui::DragFloat("Specular Intensity", &g_state.specular_intensity, 0.1f, 0.0f, 3.0f);
             
             ImGui::Separator();
             ImGui::Text("Light Info:");
@@ -2251,26 +2280,21 @@ void frame(void) {
     }
     
     // Model mode: draw loaded model (render by parts/materials)
+    // Simplified: only albedo + rim light, no IBL or directional light
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
         
-        // Update VS params to include model matrix and light MVP
+        // Update VS params (no light_mvp needed anymore)
         mmd_vs_params_t vs_params;
         vs_params.mvp = mvp;
         vs_params.model = model_mat;
-        vs_params.light_mvp = light_mvp; // For shadow mapping
         
-        // FS params for IBL and lighting
+        // FS params: only view_pos and rim light parameters
         mmd_fs_params_t fs_params;
         fs_params.view_pos = g_state.camera_pos;
-        fs_params.roughness = 0.5f; // Default roughness
-        fs_params.metallic = 0.0f;  // Default metallic
-        fs_params.ibl_strength = 1.0f;
-        fs_params.light_direction = g_state.light_direction;
-        fs_params.light_color = g_state.light_color;
-        fs_params.light_intensity = g_state.light_intensity;
-        fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
-        fs_params.receive_shadows = 0.0f; // MMD models don't receive shadows (cleaner look)
+        fs_params.rim_power = g_state.rim_power;
+        fs_params.rim_intensity = g_state.rim_intensity;
+        fs_params.rim_color = g_state.rim_color;
         
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
@@ -2285,50 +2309,18 @@ void frame(void) {
             bind.vertex_buffers[0] = g_state.vertex_buffer;
             bind.index_buffer = g_state.index_buffer;
             
-            // Use persistent view for material texture (slot 2 for diffuse texture)
+            // Use persistent view for material texture (slot 0 for diffuse texture)
             sg_view material_view = (part_idx < g_state.material_texture_views.size() && g_state.material_texture_views[part_idx].id != 0)
                 ? g_state.material_texture_views[part_idx]
                 : g_state.default_texture_view;
             
-            // Bind textures: slot 0=irradiance, slot 1=prefilter, slot 2=diffuse texture, slot 3=shadow map
-            if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
-                // Use persistent views for IBL textures
-                // TODO: These constants will be generated by sokol-shdc in shader/main.glsl.h
-                bind.views[0] = g_state.irradiance_map_view;
-                bind.samplers[0] = g_state.default_sampler;
-                bind.views[1] = g_state.prefilter_map_view;
-                bind.samplers[1] = g_state.default_sampler;
-                bind.views[2] = material_view;
-                bind.samplers[2] = g_state.default_sampler;
-                bind.views[3] = g_state.shadow_map_view;
-                bind.samplers[3] = g_state.shadow_sampler;
-                
-                sg_apply_bindings(&bind);
-                sg_apply_uniforms(0, SG_RANGE(vs_params));
-                sg_apply_uniforms(4, SG_RANGE(fs_params)); // fs_params is now binding 4
-            } else {
-                // No IBL, but still bind texture and shadow map
-                bind.views[2] = material_view;
-                bind.samplers[2] = g_state.default_sampler;
-                bind.views[3] = g_state.shadow_map_view;
-                bind.samplers[3] = g_state.shadow_sampler;
-                
-                // Create fs_params for shader (even without IBL, shader expects it)
-                mmd_fs_params_t fs_params_no_ibl;
-                fs_params_no_ibl.view_pos = g_state.camera_pos;
-                fs_params_no_ibl.roughness = 0.5f;
-                fs_params_no_ibl.metallic = 0.0f;
-                fs_params_no_ibl.ibl_strength = 0.0f; // Disable IBL
-                fs_params_no_ibl.light_direction = g_state.light_direction;
-                fs_params_no_ibl.light_color = g_state.light_color;
-                fs_params_no_ibl.light_intensity = g_state.light_intensity;
-                fs_params_no_ibl.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
-                fs_params_no_ibl.receive_shadows = 0.0f; // MMD models don't receive shadows (cleaner look)
-                
-                sg_apply_bindings(&bind);
-                sg_apply_uniforms(0, SG_RANGE(vs_params));
-                sg_apply_uniforms(4, SG_RANGE(fs_params_no_ibl)); // fs_params is now binding 4
-            }
+            // Bind only diffuse texture (slot 0)
+            bind.views[0] = material_view;
+            bind.samplers[0] = g_state.default_sampler;
+            
+            sg_apply_bindings(&bind);
+            sg_apply_uniforms(0, SG_RANGE(vs_params));
+            sg_apply_uniforms(1, SG_RANGE(fs_params)); // fs_params is now binding 1
             
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);
@@ -2339,7 +2331,7 @@ void frame(void) {
         }
     }
     
-    // Draw ground plane (white stage)
+    // Draw ground plane (white stage) - uses dedicated shader with IBL and shadows
     if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
         sg_apply_pipeline(g_state.ground_pip);
         
@@ -2349,12 +2341,14 @@ void frame(void) {
         // So: light_view_proj * ground_model = light_proj * light_view * ground_model
         HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
         
-        mmd_vs_params_t ground_vs_params;
+        // Ground uses dedicated shader with different uniform structure
+        // Structure names are generated by sokol-shdc: ground_ground_vs_params_t and ground_ground_fs_params_t
+        ground_vs_params_t ground_vs_params;
         ground_vs_params.mvp = ground_mvp;
         ground_vs_params.model = ground_model;
         ground_vs_params.light_mvp = ground_light_mvp;
         
-        mmd_fs_params_t ground_fs_params;
+        ground_fs_params_t ground_fs_params;
         ground_fs_params.view_pos = g_state.camera_pos;
         ground_fs_params.roughness = 0.8f; // Ground is less rough
         ground_fs_params.metallic = 0.0f;  // Ground is not metallic
@@ -2369,25 +2363,30 @@ void frame(void) {
         ground_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
         ground_bind.index_buffer = g_state.ground_index_buffer;
         
-        if (g_state.ibl_initialized && g_state.irradiance_map.id != 0 && g_state.prefilter_map.id != 0) {
-            ground_bind.views[0] = g_state.irradiance_map_view;
+        // Bind IBL textures and shadow map (slots 0-3)
+        // After shader compilation, use generated slot names: VIEW_mmd_ground_irradiance_map, etc.
+        if (g_state.ibl_initialized && g_state.irradiance_map_view.id != 0 && g_state.prefilter_map_view.id != 0) {
+            ground_bind.views[0] = g_state.irradiance_map_view; // Irradiance map (slot 0)
             ground_bind.samplers[0] = g_state.default_sampler;
-            ground_bind.views[1] = g_state.prefilter_map_view;
+            ground_bind.views[1] = g_state.prefilter_map_view; // Prefilter map (slot 1)
             ground_bind.samplers[1] = g_state.default_sampler;
-            ground_bind.views[2] = g_state.default_texture_view; // White texture for ground
+            ground_bind.views[2] = g_state.default_texture_view; // Diffuse texture (slot 2)
             ground_bind.samplers[2] = g_state.default_sampler;
-            ground_bind.views[3] = g_state.shadow_map_view;
+            ground_bind.views[3] = g_state.shadow_map_view; // Shadow map (slot 3)
             ground_bind.samplers[3] = g_state.shadow_sampler;
         } else {
+            // Fallback if IBL not initialized
             ground_bind.views[2] = g_state.default_texture_view;
             ground_bind.samplers[2] = g_state.default_sampler;
-            ground_bind.views[3] = g_state.shadow_map_view;
-            ground_bind.samplers[3] = g_state.shadow_sampler;
+            if (g_state.shadow_map_view.id != 0) {
+                ground_bind.views[3] = g_state.shadow_map_view;
+                ground_bind.samplers[3] = g_state.shadow_sampler;
+            }
         }
         
         sg_apply_bindings(&ground_bind);
         sg_apply_uniforms(0, SG_RANGE(ground_vs_params));
-        sg_apply_uniforms(4, SG_RANGE(ground_fs_params));
+        sg_apply_uniforms(1, SG_RANGE(ground_fs_params)); // fs_params is binding 1
         
         sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
     }
