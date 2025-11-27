@@ -110,7 +110,7 @@ float CalculateShadow(vec4 light_space_pos) {
 
 void main() {
     // Sample textures
-    vec3 albedo = texture(sampler2D(diffuse_texture, diffuse_smp), uv).rgb;
+    vec3 albedo = texture(sampler2D(diffuse_texture, diffuse_smp), uv).rgb * 0.7;
 
     // Calculate shadow
     float shadow = CalculateShadow(light_space_pos);
