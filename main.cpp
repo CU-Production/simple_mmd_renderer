@@ -232,8 +232,8 @@ struct {
     bool light_window_open = false;
     
     // Figure/Resin material parameters
-    float rim_power = 3.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
-    float rim_intensity = 1.0f; // Rim light intensity (typical: 0.5-2.0)
+    float rim_power = 2.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
+    float rim_intensity = 0.2f; // Rim light intensity (typical: 0.5-2.0)
     HMM_Vec3 rim_color = {1.0f, 1.0f, 1.0f}; // Rim light color (white for neutral, can be tinted)
     float specular_power = 64.0f; // Specular highlight power (higher = sharper, typical: 32.0-128.0)
     float specular_intensity = 1.0f; // Specular highlight intensity (typical: 0.5-2.0)
@@ -1592,7 +1592,7 @@ void frame(void) {
             ImGui::Checkbox("Enable Shadows", &g_state.shadows_enabled);
             
             ImGui::Separator();
-            ImGui::Text("Figure/Resin Material");
+            ImGui::Text("MMD Material");
             ImGui::Separator();
             
             // Rim light parameters
@@ -2021,12 +2021,17 @@ void frame(void) {
         vs_params.mvp = mvp;
         vs_params.model = model_mat;
         
-        // FS params: only view_pos and rim light parameters
+        // FS params: view_pos, rim light, and specular parameters
         mmd_fs_params_t fs_params;
         fs_params.view_pos = g_state.camera_pos;
         fs_params.rim_power = g_state.rim_power;
         fs_params.rim_intensity = g_state.rim_intensity;
         fs_params.rim_color = g_state.rim_color;
+        fs_params.specular_power = g_state.specular_power;
+        fs_params.specular_intensity = g_state.specular_intensity;
+        fs_params.light_direction = g_state.light_direction;
+        fs_params.light_color = g_state.light_color;
+        fs_params.light_intensity = g_state.light_intensity;
         
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
@@ -2053,7 +2058,7 @@ void frame(void) {
             sg_apply_bindings(&bind);
             sg_apply_uniforms(0, SG_RANGE(vs_params));
             sg_apply_uniforms(1, SG_RANGE(fs_params)); // fs_params is now binding 1
-            
+
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);
             int index_count = (int)(triangle_num * 3);
