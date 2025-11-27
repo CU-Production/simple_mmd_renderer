@@ -26,9 +26,9 @@ void main() {
     world_pos = world_pos4.xyz;
     gl_Position = mvp * vec4(position, 1.0);
     light_space_pos = light_mvp * vec4(position, 1.0); // Transform to light space
-#if !SOKOL_GLSL
+//#if !SOKOL_GLSL
     light_space_pos.y = -light_space_pos.y;
-#endif
+//#endif
     uv = texcoord0;
     norm = mat3(transpose(inverse(model))) * normal; // Transform normal to world space
 }
