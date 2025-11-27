@@ -188,18 +188,12 @@ struct {
     bool sequencer_manual_control = false;  // Whether user is manually controlling sequencer
     int sequencer_last_frame = -1;  // Track last frame to detect manual changes
     
-    // IBL (Image Based Lighting) resources
+    // Skybox resources
     sg_image equirectangular_map = {0};
     sg_image environment_cubemap = {0};
-    sg_image irradiance_map = {0};
-    sg_image prefilter_map = {0};
     sg_view environment_cubemap_view = {0}; // Persistent view for environment cubemap
-    sg_view irradiance_map_view = {0}; // Persistent view for irradiance map
-    sg_view prefilter_map_view = {0}; // Persistent view for prefilter map
     sg_sampler default_sampler = {0};
     sg_pipeline equirect_to_cubemap_pip = {0};
-    sg_pipeline irradiance_pip = {0};
-    sg_pipeline prefilter_pip = {0};
     sg_pipeline skybox_pip = {0};
     sg_buffer skybox_vertex_buffer = {0};
     sg_buffer skybox_index_buffer = {0};
@@ -1215,226 +1209,6 @@ bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     return true;
 }
 
-// Generate irradiance map from environment cubemap
-void GenerateIrradianceMap() {
-    if (g_state.environment_cubemap.id == 0) {
-        std::cerr << "Cannot generate irradiance map: environment cubemap not initialized" << std::endl;
-        return;
-    }
-    
-    const int irradiance_size = 32; // Smaller size for irradiance map
-    
-    // Create irradiance cubemap
-    sg_image_desc irradiance_desc = {};
-    irradiance_desc.type = SG_IMAGETYPE_CUBE;
-    irradiance_desc.width = irradiance_size;
-    irradiance_desc.height = irradiance_size;
-    irradiance_desc.num_slices = 6;
-    irradiance_desc.num_mipmaps = 1;
-    irradiance_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    irradiance_desc.usage.immutable = false; // Will be updated via render pass
-    irradiance_desc.usage.color_attachment = true;
-    irradiance_desc.label = "irradiance-map";
-    g_state.irradiance_map = sg_make_image(&irradiance_desc);
-    
-    // Create irradiance shader and pipeline
-    sg_shader irradiance_shd = sg_make_shader(ibl_irradiance_shader_desc(sg_query_backend()));
-    sg_pipeline_desc irradiance_pip_desc = {};
-    irradiance_pip_desc.shader = irradiance_shd;
-    irradiance_pip_desc.layout.attrs[ATTR_ibl_irradiance_position].format = SG_VERTEXFORMAT_FLOAT3;
-    irradiance_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F; // Match irradiance_map format
-    irradiance_pip_desc.depth.pixel_format = SG_PIXELFORMAT_NONE; // No depth attachment
-    irradiance_pip_desc.depth.write_enabled = false;
-    irradiance_pip_desc.depth.compare = SG_COMPAREFUNC_ALWAYS;
-    irradiance_pip_desc.cull_mode = SG_CULLMODE_FRONT;
-    irradiance_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    irradiance_pip_desc.label = "irradiance-pipeline";
-    g_state.irradiance_pip = sg_make_pipeline(&irradiance_pip_desc);
-    
-    // Create projection matrix for cubemap face (90 degree FOV)
-    HMM_Mat4 proj = HMM_Perspective_RH_ZO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
-    
-    // View matrices for each cubemap face
-    HMM_Mat4 views[6] = {
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{1.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),   // +X
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{-1.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),  // -X
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 1.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, 1.0f}),    // +Y
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, -1.0f}),  // -Y
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, 1.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),  // +Z
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, -1.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f})  // -Z
-    };
-    
-    // Render to each face
-    for (int face = 0; face < 6; ++face) {
-        HMM_Mat4 mvp = proj * views[face];
-        
-        // Create view for this cubemap face (as color attachment)
-        sg_view_desc face_view_desc = {};
-        face_view_desc.color_attachment.image = g_state.irradiance_map;
-        face_view_desc.color_attachment.slice = face;
-        sg_view face_view = sg_make_view(&face_view_desc);
-        
-        // Create pass with this face as color attachment
-        sg_pass pass = {};
-        pass.attachments.colors[0] = face_view;
-        pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
-        pass.action.colors[0].clear_value = {0.0f, 0.0f, 0.0f, 1.0f};
-        
-        // Render
-        sg_begin_pass(&pass);
-        sg_apply_pipeline(g_state.irradiance_pip);
-        
-        ibl_vs_params_t vs_params;
-        vs_params.mvp = mvp;
-        sg_apply_uniforms(UB_ibl_vs_params, SG_RANGE(vs_params));
-
-        sg_bindings bind = {};
-        bind.vertex_buffers[0] = g_state.skybox_vertex_buffer;
-        // Create view for environment cubemap (as texture)
-        sg_view_desc env_view_desc = {};
-        env_view_desc.texture.image = g_state.environment_cubemap;
-        sg_view env_view = sg_make_view(&env_view_desc);
-        bind.views[VIEW_ibl_equirectangular_map] = env_view;
-        bind.samplers[SMP_ibl_equirectangular_smp] = g_state.default_sampler;
-        sg_apply_bindings(&bind);
-        sg_destroy_view(env_view);
-        
-        sg_draw(0, 36, 1);
-        sg_end_pass();
-        sg_destroy_view(face_view);
-    }
-    
-    // Create persistent view for irradiance map
-    sg_view_desc irradiance_view_desc = {};
-    irradiance_view_desc.texture.image = g_state.irradiance_map;
-    g_state.irradiance_map_view = sg_make_view(&irradiance_view_desc);
-    
-    std::cout << "Generated irradiance map" << std::endl;
-}
-
-// Generate prefiltered environment map from environment cubemap
-void GeneratePrefilterMap() {
-    if (g_state.environment_cubemap.id == 0) {
-        std::cerr << "Cannot generate prefilter map: environment cubemap not initialized" << std::endl;
-        return;
-    }
-    
-    const int prefilter_size = 128;
-    const int max_mip_levels = 5; // log2(128) = 7, but we'll use 5 for performance
-    
-    // Create prefilter cubemap with mipmaps
-    sg_image_desc prefilter_desc = {};
-    prefilter_desc.type = SG_IMAGETYPE_CUBE;
-    prefilter_desc.width = prefilter_size;
-    prefilter_desc.height = prefilter_size;
-    prefilter_desc.num_slices = 6;
-    prefilter_desc.num_mipmaps = max_mip_levels;
-    prefilter_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    prefilter_desc.usage.immutable = false;
-    prefilter_desc.usage.color_attachment = true;
-    prefilter_desc.label = "prefilter-map";
-    g_state.prefilter_map = sg_make_image(&prefilter_desc);
-    
-    // Create prefilter shader and pipeline
-    sg_shader prefilter_shd = sg_make_shader(ibl_prefilter_shader_desc(sg_query_backend()));
-    sg_pipeline_desc prefilter_pip_desc = {};
-    prefilter_pip_desc.shader = prefilter_shd;
-    prefilter_pip_desc.layout.attrs[ATTR_ibl_prefilter_position].format = SG_VERTEXFORMAT_FLOAT3;
-    prefilter_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA32F; // Match prefilter_map format
-    prefilter_pip_desc.depth.pixel_format = SG_PIXELFORMAT_NONE; // No depth attachment
-    prefilter_pip_desc.depth.write_enabled = false;
-    prefilter_pip_desc.depth.compare = SG_COMPAREFUNC_ALWAYS;
-    prefilter_pip_desc.cull_mode = SG_CULLMODE_FRONT;
-    prefilter_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    prefilter_pip_desc.label = "prefilter-pipeline";
-    g_state.prefilter_pip = sg_make_pipeline(&prefilter_pip_desc);
-    
-    // Create projection matrix
-    HMM_Mat4 proj = HMM_Perspective_RH_ZO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
-    
-    // View matrices for each cubemap face
-    HMM_Mat4 views[6] = {
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{1.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{-1.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 1.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, 1.0f}),
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, -1.0f}),
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, 1.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f}),
-        HMM_LookAt_RH(HMM_Vec3{0.0f, 0.0f, 0.0f}, HMM_Vec3{0.0f, 0.0f, -1.0f}, HMM_Vec3{0.0f, -1.0f, 0.0f})
-    };
-    
-    // Render to each mip level
-    for (int mip = 0; mip < max_mip_levels; ++mip) {
-        int mip_width = prefilter_size * std::pow(0.5f, mip);
-        int mip_height = prefilter_size * std::pow(0.5f, mip);
-        
-        // Calculate roughness for this mip level
-        float roughness = (float)mip / (float)(max_mip_levels - 1);
-        
-        // Render to each face
-        for (int face = 0; face < 6; ++face) {
-            HMM_Mat4 mvp = proj * views[face];
-            
-            // Create view for this cubemap face and mip level (as color attachment)
-            sg_view_desc face_view_desc = {};
-            face_view_desc.color_attachment.image = g_state.prefilter_map;
-            face_view_desc.color_attachment.slice = face;
-            face_view_desc.color_attachment.mip_level = mip;
-            sg_view face_view = sg_make_view(&face_view_desc);
-            
-            // Create pass
-            sg_pass pass = {};
-            pass.attachments.colors[0] = face_view;
-            pass.action.colors[0].load_action = SG_LOADACTION_CLEAR;
-            pass.action.colors[0].clear_value = {0.0f, 0.0f, 0.0f, 1.0f};
-            
-            // Render
-            sg_begin_pass(&pass);
-            sg_apply_pipeline(g_state.prefilter_pip);
-            
-            ibl_vs_params_t vs_params;
-            vs_params.mvp = mvp;
-            // TODO: UB_ibl_vs_params will be generated by sokol-shdc in shader/ibl.glsl.h
-            // After shader compilation, uncomment and use the correct uniform block slot:
-            // sg_apply_uniforms(UB_ibl_vs_params, SG_RANGE(vs_params));
-            sg_apply_uniforms(0, SG_RANGE(vs_params));
-            
-            ibl_fs_params_t fs_params;
-            fs_params.roughness = roughness;
-            // TODO: UB_ibl_fs_params will be generated by sokol-shdc in shader/ibl.glsl.h
-            // After shader compilation, uncomment and use the correct uniform block slot:
-            // sg_apply_uniforms(UB_ibl_fs_params, SG_RANGE(fs_params));
-            sg_apply_uniforms(1, SG_RANGE(fs_params));
-            
-            sg_bindings bind = {};
-            bind.vertex_buffers[0] = g_state.skybox_vertex_buffer;
-            // Create view for environment cubemap (as texture)
-            sg_view_desc env_view_desc = {};
-            env_view_desc.texture.image = g_state.environment_cubemap;
-            sg_view env_view = sg_make_view(&env_view_desc);
-            // TODO: These constants will be generated by sokol-shdc in shader/ibl.glsl.h
-            // After shader compilation, uncomment and use the correct slot indices:
-            // bind.views[VIEW_ibl_prefilter_environment_map] = env_view;
-            // bind.samplers[SMP_ibl_prefilter_environment_smp] = g_state.default_sampler;
-            // For now, use slot 0 (will need to adjust after shader compilation)
-            bind.views[0] = env_view;
-            bind.samplers[0] = g_state.default_sampler;
-            sg_apply_bindings(&bind);
-            sg_destroy_view(env_view);
-            
-            sg_draw(0, 36, 1);
-            sg_end_pass();
-            sg_destroy_view(face_view);
-        }
-    }
-    
-    // Create persistent view for prefilter map
-    sg_view_desc prefilter_view_desc = {};
-    prefilter_view_desc.texture.image = g_state.prefilter_map;
-    g_state.prefilter_map_view = sg_make_view(&prefilter_view_desc);
-    
-    std::cout << "Generated prefilter map with " << max_mip_levels << " mip levels" << std::endl;
-}
-
 // ImGuizmo helper functions following official demo pattern
 void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     // Identity matrix for DrawGrid (column-major)
@@ -1651,15 +1425,6 @@ void init(void) {
     if (LoadHDRAndCreateCubemap(hdr_path)) {
         g_state.ibl_initialized = true;
         std::cout << "IBL initialized successfully" << std::endl;
-        
-        // Generate irradiance and prefilter maps
-        std::cout << "Generating irradiance map..." << std::endl;
-        GenerateIrradianceMap();
-        
-        std::cout << "Generating prefilter map..." << std::endl;
-        GeneratePrefilterMap();
-        
-        std::cout << "IBL prefiltering complete" << std::endl;
     } else {
         std::cerr << "Failed to initialize IBL" << std::endl;
     }
@@ -2221,23 +1986,6 @@ void frame(void) {
             }
         }
         
-        // Render ground to shadow map
-        // if (g_state.ground_vertex_buffer.id != 0 && g_state.ground_index_buffer.id != 0) {
-        //     HMM_Mat4 ground_model = HMM_M4D(1.0f); // Identity matrix for ground
-        //     HMM_Mat4 ground_light_mvp = light_view_proj * ground_model;
-        //
-        //     shadow_vs_params_t ground_shadow_vs_params;
-        //     ground_shadow_vs_params.light_mvp = ground_light_mvp;
-        //
-        //     sg_bindings ground_shadow_bind = {};
-        //     ground_shadow_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
-        //     ground_shadow_bind.index_buffer = g_state.ground_index_buffer;
-        //     sg_apply_bindings(&ground_shadow_bind);
-        //     sg_apply_uniforms(0, SG_RANGE(ground_shadow_vs_params));
-        //
-        //     sg_draw(0, 6, 1); // Ground has 6 indices (2 triangles)
-        // }
-        
         sg_end_pass();
         sg_pop_debug_group();
     }
@@ -2349,13 +2097,6 @@ void frame(void) {
         ground_vs_params.light_mvp = ground_light_mvp;
         
         ground_fs_params_t ground_fs_params;
-        ground_fs_params.view_pos = g_state.camera_pos;
-        ground_fs_params.roughness = 0.8f; // Ground is less rough
-        ground_fs_params.metallic = 0.0f;  // Ground is not metallic
-        ground_fs_params.ibl_strength = g_state.ibl_initialized ? 1.0f : 0.0f;
-        ground_fs_params.light_direction = g_state.light_direction;
-        ground_fs_params.light_color = g_state.light_color;
-        ground_fs_params.light_intensity = g_state.light_intensity;
         ground_fs_params.shadows_enabled = g_state.shadows_enabled ? 1.0f : 0.0f;
         ground_fs_params.receive_shadows = 1.0f; // Ground receives shadows
         
@@ -2363,25 +2104,11 @@ void frame(void) {
         ground_bind.vertex_buffers[0] = g_state.ground_vertex_buffer;
         ground_bind.index_buffer = g_state.ground_index_buffer;
         
-        // Bind IBL textures and shadow map (slots 0-3)
-        // After shader compilation, use generated slot names: VIEW_mmd_ground_irradiance_map, etc.
-        if (g_state.ibl_initialized && g_state.irradiance_map_view.id != 0 && g_state.prefilter_map_view.id != 0) {
-            ground_bind.views[0] = g_state.irradiance_map_view; // Irradiance map (slot 0)
-            ground_bind.samplers[0] = g_state.default_sampler;
-            ground_bind.views[1] = g_state.prefilter_map_view; // Prefilter map (slot 1)
-            ground_bind.samplers[1] = g_state.default_sampler;
-            ground_bind.views[2] = g_state.default_texture_view; // Diffuse texture (slot 2)
-            ground_bind.samplers[2] = g_state.default_sampler;
-            ground_bind.views[3] = g_state.shadow_map_view; // Shadow map (slot 3)
+        ground_bind.views[2] = g_state.default_texture_view;
+        ground_bind.samplers[2] = g_state.default_sampler;
+        if (g_state.shadow_map_view.id != 0) {
+            ground_bind.views[3] = g_state.shadow_map_view;
             ground_bind.samplers[3] = g_state.shadow_sampler;
-        } else {
-            // Fallback if IBL not initialized
-            ground_bind.views[2] = g_state.default_texture_view;
-            ground_bind.samplers[2] = g_state.default_sampler;
-            if (g_state.shadow_map_view.id != 0) {
-                ground_bind.views[3] = g_state.shadow_map_view;
-                ground_bind.samplers[3] = g_state.shadow_sampler;
-            }
         }
         
         sg_apply_bindings(&ground_bind);
@@ -2526,22 +2253,12 @@ void cleanup(void) {
     if (g_state.environment_cubemap.id != 0) {
         sg_destroy_image(g_state.environment_cubemap);
     }
-    if (g_state.irradiance_map.id != 0 && g_state.irradiance_map.id != g_state.environment_cubemap.id) {
-        sg_destroy_image(g_state.irradiance_map);
-    }
-    if (g_state.prefilter_map.id != 0 && g_state.prefilter_map.id != g_state.environment_cubemap.id) {
-        sg_destroy_image(g_state.prefilter_map);
-    }
+
     // Clean up IBL views
     if (g_state.environment_cubemap_view.id != 0) {
         sg_destroy_view(g_state.environment_cubemap_view);
     }
-    if (g_state.irradiance_map_view.id != 0) {
-        sg_destroy_view(g_state.irradiance_map_view);
-    }
-    if (g_state.prefilter_map_view.id != 0) {
-        sg_destroy_view(g_state.prefilter_map_view);
-    }
+
     if (g_state.default_sampler.id != 0) {
         sg_destroy_sampler(g_state.default_sampler);
     }
