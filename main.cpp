@@ -142,10 +142,11 @@ struct {
     bool motion_loaded = false;
 
     // Camera parameters
-    HMM_Vec3 camera_pos = {0.0f, 10.0f, 40.0f};
-    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f};
+    // Camera settings in meters (MMD models are now converted to meters)
+    HMM_Vec3 camera_pos = {0.0f, 1.6f, 4.0f}; // ~1.6m height (eye level), 4m away
+    HMM_Vec3 camera_target = {0.0f, 0.0f, 0.0f}; // Look at origin
     float camera_fov = 45.0f;
-    float camera_distance = 40.0f;
+    float camera_distance = 4.0f; // 4 meters (typical viewing distance for character)
     float camera_rotation_x = 0.0f;  // Horizontal rotation (around Y axis)
     float camera_rotation_y = 0.0f;  // Vertical rotation (around X axis)
     
@@ -217,7 +218,7 @@ struct {
     sg_sampler shadow_sampler = {0}; // Sampler for shadow map (with comparison)
     sg_pipeline shadow_pip = {0}; // Pipeline for shadow pass (depth-only)
     sg_pass shadow_pass = {0}; // Persistent shadow pass (like official demo)
-    const int shadow_map_size = 1024; // Shadow map resolution
+    const int shadow_map_size = 2048; // Shadow map resolution
     
     // Ground plane (stage)
     sg_buffer ground_vertex_buffer = {0};
@@ -734,6 +735,9 @@ void UpdateModelBuffers() {
     size_t vertex_num = g_state.model->GetVertexNum();
     vertices.reserve(vertex_num);
     
+    // MMD models use centimeters, convert to meters (divide by 10)
+    const float mmd_to_meter = 0.1f; // 10 cm = 0.1 m
+    
     for (size_t i = 0; i < vertex_num; ++i) {
         mmd::Model::Vertex<mmd::ref> vertex = g_state.model->GetVertex(i);
         mmd::Vector3f pos = vertex.GetCoordinate();
@@ -741,9 +745,11 @@ void UpdateModelBuffers() {
         mmd::Vector2f uv = vertex.GetUVCoordinate();
         
         Vertex v;
-        v.pos[0] = pos.p.x;
-        v.pos[1] = pos.p.y;
-        v.pos[2] = pos.p.z;
+        // Convert position from centimeters to meters
+        v.pos[0] = pos.p.x * mmd_to_meter;
+        v.pos[1] = pos.p.y * mmd_to_meter;
+        v.pos[2] = pos.p.z * mmd_to_meter;
+        // Normals don't need conversion (they're unit vectors)
         v.normal[0] = normal.p.x;
         v.normal[1] = normal.p.y;
         v.normal[2] = normal.p.z;
@@ -811,6 +817,9 @@ void UpdateDeformedVertices() {
     std::vector<Vertex> vertices;
     vertices.reserve(vertex_num);
     
+    // MMD models use centimeters, convert to meters (divide by 100)
+    const float mmd_to_meter = 0.1f; // 10 cm = 0.1 m
+    
     for (size_t i = 0; i < vertex_num; ++i) {
         mmd::Model::Vertex<mmd::ref> vertex = g_state.model->GetVertex(i);
         mmd::Vector2f uv = vertex.GetUVCoordinate();
@@ -820,9 +829,11 @@ void UpdateDeformedVertices() {
         const mmd::Vector3f& normal = g_state.poser->pose_image.normals[i];
         
         Vertex v;
-        v.pos[0] = pos.p.x;
-        v.pos[1] = pos.p.y;
-        v.pos[2] = pos.p.z;
+        // Convert position from centimeters to meters
+        v.pos[0] = pos.p.x * mmd_to_meter;
+        v.pos[1] = pos.p.y * mmd_to_meter;
+        v.pos[2] = pos.p.z * mmd_to_meter;
+        // Normals don't need conversion (they're unit vectors)
         v.normal[0] = normal.p.x;
         v.normal[1] = normal.p.y;
         v.normal[2] = normal.p.z;
@@ -838,8 +849,8 @@ void UpdateDeformedVertices() {
 
 // Create ground plane geometry (white stage)
 void CreateGroundGeometry() {
-    // Large ground plane (100x100 units)
-    const float size = 50.0f;
+    // Large ground plane (50m x 50m in meters)
+    const float size = 50.0f; // 50 meters
     Vertex ground_vertices[] = {
         // Position          Normal            UV
         {{-size, 0.0f, -size}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f}},
@@ -873,11 +884,11 @@ void InitializeShadowMapping() {
     // Create shadow map (depth texture)
     sg_image_desc shadow_desc = {};
     // shadow_desc.type = SG_IMAGETYPE_2D;
+    shadow_desc.usage.depth_stencil_attachment = true;
     shadow_desc.width = g_state.shadow_map_size;
     shadow_desc.height = g_state.shadow_map_size;
-    shadow_desc.sample_count = 1;
     shadow_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
-    shadow_desc.usage.depth_stencil_attachment = true;
+    shadow_desc.sample_count = 1;
     shadow_desc.label = "shadow-map";
     g_state.shadow_map = sg_make_image(&shadow_desc);
     
@@ -900,7 +911,7 @@ void InitializeShadowMapping() {
     shadow_sampler_desc.mag_filter = SG_FILTER_LINEAR;
     shadow_sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
     shadow_sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
-    shadow_sampler_desc.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    shadow_sampler_desc.compare = SG_COMPAREFUNC_LESS;
     shadow_sampler_desc.label = "shadow-sampler";
     g_state.shadow_sampler = sg_make_sampler(&shadow_sampler_desc);
     
@@ -911,8 +922,7 @@ void InitializeShadowMapping() {
     shadow_pip_desc.layout.buffers[0].stride = sizeof(Vertex);
     shadow_pip_desc.layout.attrs[ATTR_shadow_shadow_position] = { .offset = 0, .format = SG_VERTEXFORMAT_FLOAT3 };
     shadow_pip_desc.depth.write_enabled = true;
-    // shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
-    shadow_pip_desc.depth.compare = SG_COMPAREFUNC_ALWAYS;
+    shadow_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     shadow_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;
     // shadow_pip_desc.cull_mode = SG_CULLMODE_FRONT;
     shadow_pip_desc.cull_mode = SG_CULLMODE_NONE;
@@ -924,19 +934,11 @@ void InitializeShadowMapping() {
     g_state.shadow_pip = sg_make_pipeline(&shadow_pip_desc);
     
     // Create persistent shadow pass (like official demo)
-    g_state.shadow_pass = {
-        .action = {
-            .depth = {
-                .load_action = SG_LOADACTION_CLEAR,
-                .store_action = SG_STOREACTION_STORE,
-                .clear_value = 1.0f,
-            },
-        },
-        .attachments = {
-            .depth_stencil = g_state.shadow_map_ds_view,
-        },
-    };
-    
+    g_state.shadow_pass.action.depth.load_action = SG_LOADACTION_CLEAR;
+    g_state.shadow_pass.action.depth.store_action = SG_STOREACTION_STORE;
+    g_state.shadow_pass.action.depth.clear_value = 1.0f;
+    g_state.shadow_pass.attachments.depth_stencil = g_state.shadow_map_ds_view;
+
     std::cout << "Initialized shadow mapping (resolution: " << g_state.shadow_map_size << "x" << g_state.shadow_map_size << ")" << std::endl;
 }
 
@@ -1219,7 +1221,7 @@ void GenerateIrradianceMap() {
     g_state.irradiance_pip = sg_make_pipeline(&irradiance_pip_desc);
     
     // Create projection matrix for cubemap face (90 degree FOV)
-    HMM_Mat4 proj = HMM_Perspective_RH_NO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
+    HMM_Mat4 proj = HMM_Perspective_RH_ZO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
     
     // View matrices for each cubemap face
     HMM_Mat4 views[6] = {
@@ -1317,7 +1319,7 @@ void GeneratePrefilterMap() {
     g_state.prefilter_pip = sg_make_pipeline(&prefilter_pip_desc);
     
     // Create projection matrix
-    HMM_Mat4 proj = HMM_Perspective_RH_NO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
+    HMM_Mat4 proj = HMM_Perspective_RH_ZO(90.0f * 3.14159265359f / 180.0f, 1.0f, 0.1f, 10.0f);
     
     // View matrices for each cubemap face
     HMM_Mat4 views[6] = {
@@ -1453,13 +1455,14 @@ void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     }
 
     // Draw helper grid and cubes (only if enabled)
+    // Grid size in meters (1 meter per grid cell)
     if (g_state.guizmo_draw_grid) {
-        ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 100.f);
+        ImGuizmo::DrawGrid(cameraView, cameraProjection, identityMatrix, 1.0f);
     }
     
     // Draw cube at model position
-    int gizmoCount = 1;
-    ImGuizmo::DrawCubes(cameraView, cameraProjection, matrix, gizmoCount);
+    // int gizmoCount = 1;
+    // ImGuizmo::DrawCubes(cameraView, cameraProjection, matrix, gizmoCount);
 
     // View manipulate widget (camera control in top-right corner)
     // ViewManipulate modifies the view matrix directly, so we need to update camera parameters after it
@@ -1754,7 +1757,7 @@ void frame(void) {
             ImGui::Separator();
             ImGui::Text("Camera Settings");
             ImGui::DragFloat("FOV", &g_state.camera_fov, 1.0f, 10.0f, 120.0f);
-            ImGui::DragFloat("Distance", &g_state.camera_distance, 0.5f, 1.0f, 200.0f);
+            ImGui::DragFloat("Distance (m)", &g_state.camera_distance, 0.1f, 0.5f, 20.0f);
             ImGui::DragFloat("Rotation X", &g_state.camera_rotation_x, 0.01f, -3.14f, 3.14f);
             ImGui::DragFloat("Rotation Y", &g_state.camera_rotation_y, 0.01f, -1.57f, 1.57f);
             
@@ -1767,10 +1770,10 @@ void frame(void) {
             ImGui::BulletText("R: Reset camera");
             
             if (ImGui::Button("Reset Camera")) {
-                g_state.camera_pos = HMM_Vec3{0.0f, 10.0f, 40.0f};
+                g_state.camera_pos = HMM_Vec3{0.0f, 1.6f, 4.0f}; // ~1.6m height, 4m away
                 g_state.camera_target = HMM_Vec3{0.0f, 0.0f, 0.0f};
                 g_state.camera_fov = 45.0f;
-                g_state.camera_distance = 40.0f;
+                g_state.camera_distance = 4.0f; // 4 meters
                 g_state.camera_rotation_x = 0.0f;
                 g_state.camera_rotation_y = 0.0f;
             }
@@ -1942,7 +1945,7 @@ void frame(void) {
     // Handle continuous keyboard input for camera movement (WASD)
     // Move camera target, camera position will be updated based on orbit
     if (!ImGui::GetIO().WantCaptureKeyboard) {
-        const float move_speed = 50.0f;  // units per second
+        const float move_speed = 2.0f;  // meters per second (reasonable walking speed)
         HMM_Vec3 move_dir = HMM_Vec3{0.0f, 0.0f, 0.0f};
         
         // Get forward and right vectors from camera view direction
@@ -2009,7 +2012,7 @@ void frame(void) {
     g_state.camera_pos = HMM_Add(g_state.camera_target, camera_offset);
     
     // Calculate MVP matrix
-    HMM_Mat4 proj = HMM_Perspective_RH_NO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
+    HMM_Mat4 proj = HMM_Perspective_RH_ZO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
     
     // Convert model matrix from ImGuizmo format (column-major float array) to HMM_Mat4
@@ -2084,45 +2087,44 @@ void frame(void) {
         right = HMM_Vec3{1.0f, 0.0f, 0.0f}; // Fallback
     }
     
-    // Calculate actual up vector
+    // Calculate actual up vector (perpendicular to light direction)
+    // Following official demo pattern: use cross product to ensure orthogonality
     HMM_Vec3 light_up = HMM_Cross(right, light_dir);
     float up_len = HMM_LenV3(light_up);
     if (up_len > 0.001f) {
         light_up = HMM_DivV3F(light_up, up_len);
     } else {
-        light_up = HMM_Vec3{0.0f, 1.0f, 0.0f}; // Fallback
+        // If light is nearly vertical, use a fixed up vector
+        // Check if light is pointing up or down
+        if (abs(light_dir.Y) > 0.9f) {
+            // Light is nearly vertical, use forward as up reference
+            light_up = HMM_Vec3{0.0f, 0.0f, 1.0f};
+            // Recalculate right to ensure orthogonality
+            right = HMM_Cross(light_dir, light_up);
+            right = HMM_DivV3F(right, HMM_LenV3(right));
+            light_up = HMM_Cross(right, light_dir);
+        } else {
+            light_up = HMM_Vec3{0.0f, 1.0f, 0.0f}; // Fallback to world up
+        }
     }
-
-    light_up = {0.0f, 1.0f, 0.0f};
 
     // Position light far away in the direction opposite to light_dir
     // For directional light, position doesn't matter much, but we place it far away
     // The light direction points from light source to scene, so we negate it for position
-    HMM_Vec3 light_pos = HMM_MulV3F(light_dir, -100.0f);
+    // Use a reasonable distance that covers the scene (in meters)
+    HMM_Vec3 light_pos = HMM_MulV3F(light_dir, -50.0f); // 50 meters away
     HMM_Vec3 light_target = HMM_Vec3{0.0f, 0.0f, 0.0f}; // Look at origin (scene center)
     
     // Use orthographic projection for directional light
-    // Make sure the frustum is large enough to cover the scene
+    // Make sure the frustum is large enough to cover the scene (in meters)
     // Adjust these values based on your scene size
-    float light_size = 10.0f; // Size of light frustum (covers 50 units in each direction from center)
-    // For shadow mapping, use a reasonable near/far range
-    // Near should be small but not too small to avoid precision issues
-    // Far should be large enough to cover the scene
-    float light_near = 0.1f;  // Increased from 0.1f to avoid precision issues
-    float light_far = 10.0f;
-    HMM_Mat4 light_proj = HMM_Orthographic_RH_NO(-light_size, light_size, -light_size, light_size, light_near, light_far);
+    // For a character model (~1.6m tall) on a 50m x 50m ground, we need a larger frustum
+    float light_size = 5.0f; // Size of light frustum: 5m x 5m (covers 5 meters in each direction from center)
+    float light_near = 0.1f;  // 0.1 meter
+    float light_far = 100.0f;  // 100 meters (should cover the scene)
+    HMM_Mat4 light_proj = HMM_Orthographic_RH_ZO(-light_size, light_size, -light_size, light_size, light_near, light_far);
     HMM_Mat4 light_view = HMM_LookAt_RH(light_pos, light_target, light_up);
-    
-    // Calculate light view-proj matrix
-    // Note: HMM uses right-to-left matrix multiplication (OpenGL style)
-    // So: light_proj * light_view means: first apply view, then apply proj
-    // This is equivalent to: light_proj * light_view (in HMM) = view * proj (in vecmath/row-major)
-    HMM_Mat4 light_view_proj = light_proj * light_view;
-
-    // Calculate light MVP: light_view_proj * model_mat
-    // HMM right-to-left: light_proj * light_view * model_mat
-    // This transforms vertices from model space to light clip space
-    HMM_Mat4 light_mvp = light_view_proj * model_mat;
+    HMM_Mat4 light_mvp = light_proj * light_view * model_mat;
     
     // Render shadow pass first (before main rendering)
     // Use persistent shadow pass (like official demo)
@@ -2314,7 +2316,7 @@ void frame(void) {
         HMM_Mat4 ground_mvp = proj * view * ground_model;
         // HMM uses right-to-left matrix multiplication (OpenGL style)
         // So: light_view_proj * ground_model = light_proj * light_view * ground_model
-        HMM_Mat4 ground_light_mvp = light_view_proj * ground_model;
+        HMM_Mat4 ground_light_mvp = light_proj * light_view * ground_model;
         
         mmd_vs_params_t ground_vs_params;
         ground_vs_params.mvp = ground_mvp;
@@ -2627,13 +2629,13 @@ void input(const sapp_event* ev) {
             g_state.last_mouse_y = ev->mouse_y;
         } else if (ev->type == SAPP_EVENTTYPE_MOUSE_SCROLL) {
             // Zoom with mouse wheel
-            const float zoom_speed = 2.0f;
+            const float zoom_speed = 0.2f; // meters per scroll (in meters)
             g_state.camera_distance -= ev->scroll_y * zoom_speed;
-            if (g_state.camera_distance < 1.0f) {
-                g_state.camera_distance = 1.0f;
+            if (g_state.camera_distance < 0.5f) {
+                g_state.camera_distance = 0.5f; // Minimum 0.5 meters
             }
-            if (g_state.camera_distance > 200.0f) {
-                g_state.camera_distance = 200.0f;
+            if (g_state.camera_distance > 20.0f) {
+                g_state.camera_distance = 20.0f; // Maximum 20 meters
             }
         }
         
@@ -2646,10 +2648,10 @@ void input(const sapp_event* ev) {
                 sapp_request_quit();
             } else if (ev->key_code == SAPP_KEYCODE_R) {
                 // Reset camera
-                g_state.camera_pos = HMM_Vec3{0.0f, 10.0f, 40.0f};
+                g_state.camera_pos = HMM_Vec3{0.0f, 1.6f, 4.0f}; // ~1.6m height, 4m away
                 g_state.camera_target = HMM_Vec3{0.0f, 0.0f, 0.0f};
                 g_state.camera_fov = 45.0f;
-                g_state.camera_distance = 40.0f;
+                g_state.camera_distance = 4.0f; // 4 meters
                 g_state.camera_rotation_x = 0.0f;
                 g_state.camera_rotation_y = 0.0f;
             }
