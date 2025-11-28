@@ -15,12 +15,14 @@ endif()
 
 # Windows-specific settings
 if(WIN32)
-    add_definitions(-DSOKOL_D3D11)
+    add_definitions(-DSOKOL_VULKAN)
+#    add_definitions(-DSOKOL_D3D11)
 #    add_definitions(-DSOKOL_GLCORE)
 endif()
 
 # Linux-specific settings
 if(UNIX AND NOT APPLE)
+#    add_definitions(-DSOKOL_VULKAN)
     add_definitions(-DSOKOL_GLCORE)
 endif()
 
@@ -60,7 +62,7 @@ endif()
 
 # Determine shader languages to generate (sokol-shdc supports multi-language output, use colon separator)
 # Generate all required shader languages to support cross-platform
-set(SHADER_LANG "glsl430:hlsl5:metal_macos")
+set(SHADER_LANG "glsl430:hlsl5:metal_macos:spirv_vk")
 
 # Compile shader files
 set(SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/main.glsl)
