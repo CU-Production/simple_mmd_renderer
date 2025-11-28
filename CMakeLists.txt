@@ -15,9 +15,8 @@ endif()
 
 # Windows-specific settings
 if(WIN32)
-    add_definitions(-DSOKOL_D3D11)
-#    add_definitions(-DSOKOL_GLCORE)
-#    add_definitions(-DMMD_WINDOWS)
+#    add_definitions(-DSOKOL_D3D11)
+    add_definitions(-DSOKOL_GLCORE)
 endif()
 
 # Linux-specific settings

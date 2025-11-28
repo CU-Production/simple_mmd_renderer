@@ -217,11 +217,6 @@ struct {
     sg_pass_action shadow_pass_action;
     const int shadow_map_size = 2048;
     
-    // Dummy color attachment for OpenGL workaround (depth-only framebuffers need glDrawBuffer(GL_NONE))
-    // This is a workaround for sokol not setting glDrawBuffer(GL_NONE) when there are no color attachments
-    sg_image shadow_dummy_color = {0};
-    sg_view shadow_dummy_color_view = {0};
-    
     // Ground plane (stage)
     sg_buffer ground_vertex_buffer = {0};
     sg_buffer ground_index_buffer = {0};
@@ -950,34 +945,13 @@ void InitializeShadowMapping() {
     shadow_pip_desc.sample_count = 1;  // Shadow map doesn't need MSAA, keep it at 1
     shadow_pip_desc.label = "shadow-pipeline";
     // No color output for shadow pass
-    // shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_NONE;
-    shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_R8;
+    shadow_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_NONE;
     g_state.shadow_pip = sg_make_pipeline(&shadow_pip_desc);
     
     // Create persistent shadow pass (like official demo)
     g_state.shadow_pass_action.depth.load_action = SG_LOADACTION_CLEAR;
     g_state.shadow_pass_action.depth.store_action = SG_STOREACTION_STORE;
     g_state.shadow_pass_action.depth.clear_value = 1.0f;
-    
-    // Workaround for OpenGL: Create a dummy color attachment
-    // In OpenGL, framebuffers with only depth attachments need glDrawBuffer(GL_NONE),
-    // but sokol doesn't set this automatically. Adding a dummy color attachment ensures
-    // glDrawBuffers is called correctly, allowing depth clear to work.
-    sg_image_desc dummy_color_desc = {};
-    dummy_color_desc.type = SG_IMAGETYPE_2D;
-    dummy_color_desc.width = g_state.shadow_map_size;
-    dummy_color_desc.height = g_state.shadow_map_size;
-    dummy_color_desc.num_mipmaps = 1;
-    dummy_color_desc.pixel_format = SG_PIXELFORMAT_R8;
-    dummy_color_desc.usage.color_attachment = true;
-    dummy_color_desc.sample_count = 1;  // Shadow map doesn't need MSAA, keep it at 1
-    dummy_color_desc.label = "shadow-dummy-color";
-    g_state.shadow_dummy_color = sg_make_image(&dummy_color_desc);
-    
-    sg_view_desc dummy_color_view_desc = {};
-    dummy_color_view_desc.color_attachment.image = g_state.shadow_dummy_color;
-    dummy_color_view_desc.label = "shadow-dummy-color-view";
-    g_state.shadow_dummy_color_view = sg_make_view(&dummy_color_view_desc);
 
     std::cout << "Initialized shadow mapping (resolution: " << g_state.shadow_map_size << "x" << g_state.shadow_map_size << ")" << std::endl;
 }
@@ -2041,10 +2015,6 @@ void frame(void) {
         sg_pass _shadow_pass = {0};
         _shadow_pass.action = g_state.shadow_pass_action;
         _shadow_pass.attachments.depth_stencil = g_state.shadow_map_ds_view;
-        // Workaround for OpenGL: Add dummy color attachment to ensure glDrawBuffers is called correctly
-        // This fixes the issue where depth clear doesn't work in OpenGL when there are no color attachments
-        _shadow_pass.attachments.colors[0] = g_state.shadow_dummy_color_view;
-        _shadow_pass.action.colors[0].load_action = SG_LOADACTION_DONTCARE; // Don't care about color clear
         _shadow_pass.label = "_shadow_pass";
         sg_begin_pass(&_shadow_pass);
         sg_apply_pipeline(g_state.shadow_pip);
@@ -2383,13 +2353,6 @@ void cleanup(void) {
     }
     if (g_state.shadow_sampler.id != 0) {
         sg_destroy_sampler(g_state.shadow_sampler);
-    }
-    // Clean up dummy color attachment (OpenGL workaround)
-    if (g_state.shadow_dummy_color_view.id != 0) {
-        sg_destroy_view(g_state.shadow_dummy_color_view);
-    }
-    if (g_state.shadow_dummy_color.id != 0) {
-        sg_destroy_image(g_state.shadow_dummy_color);
     }
     // Clean up ground resources
     if (g_state.ground_vertex_buffer.id != 0) {
