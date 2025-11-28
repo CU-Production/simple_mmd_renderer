@@ -26,6 +26,7 @@
 #include "shader/ground.glsl.h"
 #include "shader/ibl.glsl.h"
 #include "shader/shadow.glsl.h"
+#include "shader/taa.glsl.h"
 #include "nfd.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -230,6 +231,7 @@ struct {
     bool shadows_enabled = true;
     bool light_window_open = false;
     bool material_window_open = false;
+    bool taa_window_open = false;
 
     // Figure/Resin material parameters
     float rim_power = 2.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
@@ -237,6 +239,30 @@ struct {
     HMM_Vec3 rim_color = {1.0f, 1.0f, 1.0f}; // Rim light color (white for neutral, can be tinted)
     float specular_power = 64.0f; // Specular highlight power (higher = sharper, typical: 32.0-128.0)
     float specular_intensity = 1.0f; // Specular highlight intensity (typical: 0.5-2.0)
+    
+    // TAA (Temporal Anti-Aliasing) resources
+    bool taa_enabled = true;
+    sg_image taa_current_color = {0};
+    sg_image taa_current_depth = {0};
+    sg_image taa_history_color = {0};
+    sg_image taa_output_color = {0}; // TAA output buffer
+    sg_view taa_current_color_view = {0};
+    sg_view taa_current_depth_view = {0};
+    sg_view taa_history_color_view = {0};
+    sg_view taa_output_color_view = {0};
+    sg_view taa_output_color_attach_view = {0}; // Persistent view for color attachment
+    sg_view taa_history_color_attach_view = {0}; // Persistent view for history color attachment
+    sg_view taa_current_color_attach_view = {0}; // Persistent view for current color attachment
+    sg_pipeline taa_pip = {0}; // For passes without depth buffer
+    sg_pipeline taa_pip_with_depth = {0}; // For passes with depth buffer (swapchain)
+    sg_buffer taa_quad_vbuf = {0};
+    sg_sampler taa_sampler = {0};
+    HMM_Vec2 taa_jitter_offset = {0.0f, 0.0f};
+    HMM_Vec2 taa_prev_jitter_offset = {0.0f, 0.0f};
+    int taa_jitter_index = 0;
+    float taa_blend_factor = 0.1f; // TAA blend factor (0.05-0.2 typical)
+    int taa_width = 0;
+    int taa_height = 0;
 } g_state;
 
 
@@ -956,6 +982,227 @@ void InitializeShadowMapping() {
     std::cout << "Initialized shadow mapping (resolution: " << g_state.shadow_map_size << "x" << g_state.shadow_map_size << ")" << std::endl;
 }
 
+// Generate Halton sequence value for TAA jitter
+float GetHaltonValue(int index, int base) {
+    float result = 0.0f;
+    float f = 1.0f / base;
+    int i = index;
+    while (i > 0) {
+        result += f * (i % base);
+        i = i / base;
+        f /= base;
+    }
+    return result;
+}
+
+// Get 2D jitter offset for TAA (using Halton sequence)
+HMM_Vec2 GetTAAJitter(int frame_index) {
+    // Use Halton(2,3) sequence for good distribution
+    float jitter_x = GetHaltonValue(frame_index, 2);
+    float jitter_y = GetHaltonValue(frame_index, 3);
+    
+    // Convert to pixel offset (typically -0.5 to 0.5 pixels)
+    // For better quality, we can use sub-pixel jitter
+    float jitter_scale = 0.5f; // Half pixel jitter
+    return HMM_Vec2{
+        (jitter_x * 2.0f - 1.0f) * jitter_scale,
+        (jitter_y * 2.0f - 1.0f) * jitter_scale
+    };
+}
+
+// Create fullscreen quad for TAA post-processing
+void CreateTAAQuad() {
+    // Fullscreen quad vertices (position only, in NDC space [-1,1])
+    float quad_vertices[] = {
+        -1.0f, -1.0f,  // Bottom-left
+         1.0f, -1.0f,  // Bottom-right
+        -1.0f,  1.0f,  // Top-left
+         1.0f,  1.0f   // Top-right
+    };
+    
+    sg_buffer_desc vbuf_desc = {};
+    vbuf_desc.size = sizeof(quad_vertices);
+    vbuf_desc.data.ptr = quad_vertices;
+    vbuf_desc.data.size = sizeof(quad_vertices);
+    vbuf_desc.label = "taa-quad-vertices";
+    g_state.taa_quad_vbuf = sg_make_buffer(&vbuf_desc);
+}
+
+// Initialize TAA resources
+void InitializeTAA(int width, int height) {
+    g_state.taa_width = width;
+    g_state.taa_height = height;
+    
+    // Create current frame color buffer
+    sg_image_desc current_color_desc = {};
+    current_color_desc.type = SG_IMAGETYPE_2D;
+    current_color_desc.width = width;
+    current_color_desc.height = height;
+    current_color_desc.num_mipmaps = 1;
+    current_color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    current_color_desc.usage.color_attachment = true;
+    current_color_desc.sample_count = 1; // No MSAA on intermediate buffers
+    current_color_desc.label = "taa-current-color";
+    g_state.taa_current_color = sg_make_image(&current_color_desc);
+    
+    // Create current frame depth buffer
+    sg_image_desc current_depth_desc = {};
+    current_depth_desc.type = SG_IMAGETYPE_2D;
+    current_depth_desc.width = width;
+    current_depth_desc.height = height;
+    current_depth_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
+    current_depth_desc.usage.depth_stencil_attachment = true;
+    current_depth_desc.sample_count = 1;
+    current_depth_desc.label = "taa-current-depth";
+    g_state.taa_current_depth = sg_make_image(&current_depth_desc);
+    
+    // Create history frame color buffer
+    // History buffer needs to be both a render target (for copying TAA output) and a texture (for sampling)
+    sg_image_desc history_color_desc = {};
+    history_color_desc.type = SG_IMAGETYPE_2D;
+    history_color_desc.width = width;
+    history_color_desc.height = height;
+    history_color_desc.num_mipmaps = 1;
+    history_color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    history_color_desc.usage.color_attachment = true; // Can be used as render target
+    history_color_desc.sample_count = 1;
+    history_color_desc.label = "taa-history-color";
+    g_state.taa_history_color = sg_make_image(&history_color_desc);
+    
+    // Create TAA output color buffer (for ping-pong with history)
+    sg_image_desc output_color_desc = {};
+    output_color_desc.type = SG_IMAGETYPE_2D;
+    output_color_desc.width = width;
+    output_color_desc.height = height;
+    output_color_desc.num_mipmaps = 1;
+    output_color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    output_color_desc.usage.color_attachment = true;
+    output_color_desc.label = "taa-output-color";
+    g_state.taa_output_color = sg_make_image(&output_color_desc);
+    
+    // Create views
+    sg_view_desc current_color_view_desc = {};
+    current_color_view_desc.texture.image = g_state.taa_current_color;
+    current_color_view_desc.label = "taa-current-color-view";
+    g_state.taa_current_color_view = sg_make_view(&current_color_view_desc);
+    
+    sg_view_desc current_depth_view_desc = {};
+    current_depth_view_desc.depth_stencil_attachment.image = g_state.taa_current_depth;
+    current_depth_view_desc.label = "taa-current-depth-view";
+    g_state.taa_current_depth_view = sg_make_view(&current_depth_view_desc);
+    
+    sg_view_desc history_color_view_desc = {};
+    history_color_view_desc.texture.image = g_state.taa_history_color;
+    history_color_view_desc.label = "taa-history-color-view";
+    g_state.taa_history_color_view = sg_make_view(&history_color_view_desc);
+    
+    sg_view_desc output_color_view_desc = {};
+    output_color_view_desc.texture.image = g_state.taa_output_color;
+    output_color_view_desc.label = "taa-output-color-view";
+    g_state.taa_output_color_view = sg_make_view(&output_color_view_desc);
+    
+    // Also create color attachment views for rendering (persistent)
+    sg_view_desc output_color_attach_view_desc = {};
+    output_color_attach_view_desc.color_attachment.image = g_state.taa_output_color;
+    output_color_attach_view_desc.label = "taa-output-color-attach-view";
+    g_state.taa_output_color_attach_view = sg_make_view(&output_color_attach_view_desc);
+    
+    sg_view_desc current_color_attach_view_desc = {};
+    current_color_attach_view_desc.color_attachment.image = g_state.taa_current_color;
+    current_color_attach_view_desc.label = "taa-current-color-attach-view";
+    g_state.taa_current_color_attach_view = sg_make_view(&current_color_attach_view_desc);
+    
+    sg_view_desc history_color_attach_view_desc = {};
+    history_color_attach_view_desc.color_attachment.image = g_state.taa_history_color;
+    history_color_attach_view_desc.label = "taa-history-color-attach-view";
+    g_state.taa_history_color_attach_view = sg_make_view(&history_color_attach_view_desc);
+    
+    // Create TAA sampler
+    sg_sampler_desc taa_sampler_desc = {};
+    taa_sampler_desc.min_filter = SG_FILTER_LINEAR;
+    taa_sampler_desc.mag_filter = SG_FILTER_LINEAR;
+    taa_sampler_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    taa_sampler_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    taa_sampler_desc.label = "taa-sampler";
+    g_state.taa_sampler = sg_make_sampler(&taa_sampler_desc);
+    
+    // Create TAA shader and pipelines
+    sg_shader taa_shd = sg_make_shader(taa_taa_shader_desc(sg_query_backend()));
+    
+    // Base pipeline descriptor
+    sg_pipeline_desc taa_pip_desc = {};
+    taa_pip_desc.shader = taa_shd;
+    taa_pip_desc.layout.attrs[ATTR_taa_taa_position].format = SG_VERTEXFORMAT_FLOAT2;
+    taa_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLE_STRIP;
+    taa_pip_desc.sample_count = 1; // No MSAA, TAA handles anti-aliasing
+    taa_pip_desc.depth.write_enabled = false; // TAA is post-processing, no depth needed
+    taa_pip_desc.depth.compare = SG_COMPAREFUNC_ALWAYS; // Always pass depth test (disabled)
+    
+    // Get swapchain formats
+    sg_pixel_format swapchain_color_format = (sg_pixel_format)sapp_color_format();
+    sg_pixel_format swapchain_depth_format = (sg_pixel_format)sapp_depth_format();
+    
+    // Pipeline for passes without depth buffer (TAA pass, history copy pass)
+    // These render to intermediate buffers with RGBA8 format
+    taa_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8; // Match TAA output buffer format
+    taa_pip_desc.depth.pixel_format = SG_PIXELFORMAT_NONE;
+    taa_pip_desc.label = "taa-pipeline-no-depth";
+    g_state.taa_pip = sg_make_pipeline(&taa_pip_desc);
+    
+    // Pipeline for passes with depth buffer (blit pass to swapchain)
+    // This renders to swapchain, so must match swapchain color format
+    if (swapchain_depth_format != SG_PIXELFORMAT_NONE) {
+        taa_pip_desc.colors[0].pixel_format = swapchain_color_format; // Match swapchain color format
+        taa_pip_desc.depth.pixel_format = swapchain_depth_format;
+        taa_pip_desc.label = "taa-pipeline-with-depth";
+        g_state.taa_pip_with_depth = sg_make_pipeline(&taa_pip_desc);
+    } else {
+        // If swapchain has no depth, still need to match color format
+        taa_pip_desc.colors[0].pixel_format = swapchain_color_format; // Match swapchain color format
+        taa_pip_desc.depth.pixel_format = SG_PIXELFORMAT_NONE;
+        taa_pip_desc.label = "taa-pipeline-swapchain";
+        g_state.taa_pip_with_depth = sg_make_pipeline(&taa_pip_desc);
+    }
+    
+    // Create fullscreen quad
+    CreateTAAQuad();
+    
+    std::cout << "Initialized TAA (resolution: " << width << "x" << height << ")" << std::endl;
+}
+
+// Resize TAA buffers when window size changes
+void ResizeTAA(int width, int height) {
+    if (g_state.taa_width == width && g_state.taa_height == height) {
+        return; // No resize needed
+    }
+    
+    // Destroy old resources
+    if (g_state.taa_current_color.id != 0) {
+        sg_destroy_image(g_state.taa_current_color);
+        sg_destroy_image(g_state.taa_current_depth);
+        sg_destroy_image(g_state.taa_history_color);
+        sg_destroy_image(g_state.taa_output_color);
+        sg_destroy_view(g_state.taa_current_color_view);
+        sg_destroy_view(g_state.taa_current_depth_view);
+        sg_destroy_view(g_state.taa_history_color_view);
+        sg_destroy_view(g_state.taa_output_color_view);
+        sg_destroy_view(g_state.taa_output_color_attach_view);
+        sg_destroy_view(g_state.taa_current_color_attach_view);
+        sg_destroy_view(g_state.taa_history_color_attach_view);
+    }
+    
+    // Destroy old pipelines
+    if (g_state.taa_pip.id != 0) {
+        sg_destroy_pipeline(g_state.taa_pip);
+    }
+    if (g_state.taa_pip_with_depth.id != 0 && g_state.taa_pip_with_depth.id != g_state.taa_pip.id) {
+        sg_destroy_pipeline(g_state.taa_pip_with_depth);
+    }
+    
+    // Reinitialize with new size
+    InitializeTAA(width, height);
+}
+
 // Create skybox geometry (cube)
 void CreateSkyboxGeometry() {
     // Cube vertices (positions only, no normals/UVs needed for skybox)
@@ -1291,7 +1538,7 @@ void init(void) {
     // Setup ImGui
     simgui_desc_t _simgui_desc = {};
     _simgui_desc.logger.func = slog_func;
-    _simgui_desc.sample_count = 4;
+    _simgui_desc.sample_count = 1;
     simgui_setup(&_simgui_desc);
     
     // Setup sokol-gfx ImGui debug UI
@@ -1316,7 +1563,9 @@ void init(void) {
     _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    _sg_pipeline_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    _sg_pipeline_desc.sample_count = 1;  // No MSAA, using TAA for anti-aliasing
+    _sg_pipeline_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8; // Match TAA intermediate buffer format
+    _sg_pipeline_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH; // Match depth buffer format
     _sg_pipeline_desc.label = "model-pipeline";
 
     g_state.pip = sg_make_pipeline(&_sg_pipeline_desc);
@@ -1340,6 +1589,13 @@ void init(void) {
     // Initialize shadow mapping
     InitializeShadowMapping();
     
+    // Initialize TAA (will be resized in frame if needed)
+    int initial_width = sapp_width();
+    int initial_height = sapp_height();
+    if (initial_width > 0 && initial_height > 0) {
+        InitializeTAA(initial_width, initial_height);
+    }
+    
     // Create ground pipeline (uses dedicated ground shader with shadows)
     sg_shader ground_shd = sg_make_shader(ground_ground_shader_desc(sg_query_backend()));
     sg_pipeline_desc ground_pip_desc = {};
@@ -1353,7 +1609,9 @@ void init(void) {
     ground_pip_desc.cull_mode = SG_CULLMODE_BACK;
     ground_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     ground_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    ground_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    ground_pip_desc.sample_count = 1;  // No MSAA, using TAA for anti-aliasing
+    ground_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8; // Match TAA intermediate buffer format
+    ground_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH; // Match depth buffer format
     ground_pip_desc.label = "ground-pipeline";
     g_state.ground_pip = sg_make_pipeline(&ground_pip_desc);
     
@@ -1395,7 +1653,9 @@ void init(void) {
     skybox_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
     skybox_pip_desc.cull_mode = SG_CULLMODE_FRONT;
     skybox_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    skybox_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    skybox_pip_desc.sample_count = 1;  // No MSAA, using TAA for anti-aliasing
+    skybox_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8; // Match TAA intermediate buffer format
+    skybox_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH; // Match depth buffer format (same as TAA current depth)
     skybox_pip_desc.label = "skybox-pipeline";
     g_state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
     
@@ -1429,6 +1689,20 @@ void frame(void) {
     
     int width = sapp_width();
     int height = sapp_height();
+    
+    // Resize TAA buffers if window size changed
+    if (g_state.taa_enabled && (g_state.taa_width != width || g_state.taa_height != height)) {
+        ResizeTAA(width, height);
+    }
+    
+    // Calculate TAA jitter if enabled
+    HMM_Vec2 jitter = {0.0f, 0.0f};
+    if (g_state.taa_enabled && g_state.taa_current_color.id != 0) {
+        g_state.taa_prev_jitter_offset = g_state.taa_jitter_offset;
+        jitter = GetTAAJitter(g_state.taa_jitter_index);
+        g_state.taa_jitter_offset = jitter;
+        g_state.taa_jitter_index = (g_state.taa_jitter_index + 1) % 8; // Cycle through 8 jitter samples
+    }
     
     // Setup ImGui frame
     simgui_frame_desc_t simgui_frame = {};
@@ -1508,6 +1782,7 @@ void frame(void) {
         if (ImGui::BeginMenu("Render")) {
             ImGui::MenuItem("Light Controls", nullptr, &g_state.light_window_open);
             ImGui::MenuItem("Materials", nullptr, &g_state.material_window_open);
+            ImGui::MenuItem("TAA Settings", nullptr, &g_state.taa_window_open);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Physics")) {
@@ -1622,6 +1897,23 @@ void frame(void) {
             ImGui::Text("Color: (%.3f, %.3f, %.3f)",
                 g_state.light_color.X, g_state.light_color.Y, g_state.light_color.Z);
             ImGui::Text("Intensity: %.2f", g_state.light_intensity);
+        }
+        ImGui::End();
+    }
+    
+    // Draw TAA settings window
+    if (g_state.taa_window_open) {
+        if (ImGui::Begin("TAA Settings", &g_state.taa_window_open)) {
+            ImGui::Checkbox("Enable TAA", &g_state.taa_enabled);
+            ImGui::Separator();
+            ImGui::DragFloat("Blend Factor", &g_state.taa_blend_factor, 0.01f, 0.05f, 0.3f);
+            ImGui::Text("Blend factor controls how much of the current frame vs history is used.");
+            ImGui::Text("Lower values = more temporal smoothing but more ghosting");
+            ImGui::Text("Higher values = less ghosting but less effective anti-aliasing");
+            ImGui::Separator();
+            ImGui::Text("Jitter Index: %d", g_state.taa_jitter_index);
+            ImGui::Text("Current Jitter: (%.3f, %.3f)", g_state.taa_jitter_offset.X, g_state.taa_jitter_offset.Y);
+            ImGui::Text("Previous Jitter: (%.3f, %.3f)", g_state.taa_prev_jitter_offset.X, g_state.taa_prev_jitter_offset.Y);
         }
         ImGui::End();
     }
@@ -1894,7 +2186,16 @@ void frame(void) {
     g_state.camera_pos = HMM_Add(g_state.camera_target, camera_offset);
     
     // Calculate MVP matrix
+    // Apply jitter to projection matrix for TAA
     HMM_Mat4 proj = HMM_Perspective_RH_ZO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
+    if (g_state.taa_enabled && (jitter.X != 0.0f || jitter.Y != 0.0f)) {
+        // Apply sub-pixel jitter to projection matrix
+        // Jitter is in pixel space, convert to NDC space
+        float jitter_x_ndc = (jitter.X * 2.0f) / (float)width;
+        float jitter_y_ndc = (jitter.Y * 2.0f) / (float)height;
+        proj.Elements[2][0] += jitter_x_ndc; // Add jitter to projection matrix
+        proj.Elements[2][1] += jitter_y_ndc;
+    }
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
     
     // Convert model matrix from ImGuizmo format (column-major float array) to HMM_Mat4
@@ -2052,11 +2353,22 @@ void frame(void) {
     }
 
     // Begin main rendering pass
+    // If TAA is enabled, render to intermediate buffer first
     sg_push_debug_group("main pass");
     sg_pass _sg_pass{};
     _sg_pass.action = g_state.main_pass_action;
-    _sg_pass.swapchain = sglue_swapchain();
-    _sg_pass.label = "main pass";
+    
+    if (g_state.taa_enabled && g_state.taa_current_color.id != 0) {
+        // Render to TAA intermediate buffer
+        // Use persistent color attachment view
+        _sg_pass.attachments.colors[0] = g_state.taa_current_color_attach_view;
+        _sg_pass.attachments.depth_stencil = g_state.taa_current_depth_view;
+        _sg_pass.label = "main pass (taa intermediate)";
+    } else {
+        // Render directly to swapchain
+        _sg_pass.swapchain = sglue_swapchain();
+        _sg_pass.label = "main pass";
+    }
 
     sg_begin_pass(&_sg_pass);
 
@@ -2187,6 +2499,104 @@ void frame(void) {
     // End model rendering pass
     sg_end_pass();
     sg_pop_debug_group();
+    
+    // Apply TAA if enabled
+    if (g_state.taa_enabled && g_state.taa_current_color.id != 0 && g_state.taa_pip.id != 0 && g_state.taa_pip_with_depth.id != 0) {
+        sg_push_debug_group("TAA pass");
+        
+        // Prepare TAA parameters
+        taa_taa_params_t taa_params;
+        taa_params.jitter_offset = g_state.taa_jitter_offset;
+        taa_params.prev_jitter_offset = g_state.taa_prev_jitter_offset;
+        taa_params.screen_size = HMM_Vec2{(float)width, (float)height};
+        taa_params.blend_factor = g_state.taa_blend_factor;
+        
+        // Create TAA output pass (render to intermediate output buffer first)
+        sg_pass taa_pass = {};
+        taa_pass.action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.0f, 0.0f, 0.0f, 1.0f} };
+        // Use persistent color attachment view
+        taa_pass.attachments.colors[0] = g_state.taa_output_color_attach_view;
+        taa_pass.label = "taa pass";
+        
+        sg_begin_pass(&taa_pass);
+        sg_apply_pipeline(g_state.taa_pip); // No depth buffer in this pass
+        
+        // Bind textures: current frame (slot 0), history frame (slot 1), depth (slot 2)
+        sg_bindings taa_bind = {};
+        taa_bind.vertex_buffers[0] = g_state.taa_quad_vbuf;
+        taa_bind.views[0] = g_state.taa_current_color_view;
+        taa_bind.samplers[0] = g_state.taa_sampler;
+        taa_bind.views[1] = g_state.taa_history_color_view;
+        taa_bind.samplers[1] = g_state.taa_sampler;
+        taa_bind.views[2] = g_state.taa_current_depth_view;
+        taa_bind.samplers[2] = g_state.taa_sampler;
+        
+        sg_apply_bindings(&taa_bind);
+        sg_apply_uniforms(3, SG_RANGE(taa_params)); // binding=3 for taa_params
+        
+        // Draw fullscreen quad (4 vertices, triangle strip)
+        sg_draw(0, 4, 1);
+        
+        sg_end_pass();
+        sg_pop_debug_group();
+        
+        // Copy TAA output to swapchain (simple blit pass)
+        sg_push_debug_group("TAA blit to swapchain");
+        sg_pass blit_pass = {};
+        blit_pass.action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.0f, 0.0f, 0.0f, 1.0f} };
+        blit_pass.swapchain = sglue_swapchain();
+        blit_pass.label = "taa blit pass";
+        
+        sg_begin_pass(&blit_pass);
+        sg_apply_pipeline(g_state.taa_pip_with_depth); // Swapchain may have depth buffer
+        
+        // Use output as source, render to swapchain
+        sg_bindings blit_bind = {};
+        blit_bind.vertex_buffers[0] = g_state.taa_quad_vbuf;
+        blit_bind.views[0] = g_state.taa_output_color_view;
+        blit_bind.samplers[0] = g_state.taa_sampler;
+        blit_bind.views[1] = g_state.taa_output_color_view; // Not used for blit
+        blit_bind.samplers[1] = g_state.taa_sampler;
+        blit_bind.views[2] = g_state.taa_current_depth_view;
+        blit_bind.samplers[2] = g_state.taa_sampler;
+        
+        // Use blend factor of 1.0 to fully copy output
+        taa_params.blend_factor = 1.0f;
+        sg_apply_bindings(&blit_bind);
+        sg_apply_uniforms(3, SG_RANGE(taa_params)); // binding=3 for taa_params
+        sg_draw(0, 4, 1);
+        
+        sg_end_pass();
+        sg_pop_debug_group();
+        
+        // Copy TAA output to history buffer for next frame (ping-pong)
+        sg_push_debug_group("TAA copy to history");
+        sg_pass history_copy_pass = {};
+        history_copy_pass.action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.0f, 0.0f, 0.0f, 1.0f} };
+        // Use persistent color attachment view
+        history_copy_pass.attachments.colors[0] = g_state.taa_history_color_attach_view;
+        history_copy_pass.label = "history copy pass";
+        
+        sg_begin_pass(&history_copy_pass);
+        sg_apply_pipeline(g_state.taa_pip); // No depth buffer in this pass
+        
+        // Copy output to history
+        sg_bindings copy_bind = {};
+        copy_bind.vertex_buffers[0] = g_state.taa_quad_vbuf;
+        copy_bind.views[0] = g_state.taa_output_color_view;
+        copy_bind.samplers[0] = g_state.taa_sampler;
+        copy_bind.views[1] = g_state.taa_output_color_view; // Not used
+        copy_bind.samplers[1] = g_state.taa_sampler;
+        copy_bind.views[2] = g_state.taa_current_depth_view;
+        copy_bind.samplers[2] = g_state.taa_sampler;
+        
+        sg_apply_bindings(&copy_bind);
+        sg_apply_uniforms(3, SG_RANGE(taa_params)); // binding=3 for taa_params
+        sg_draw(0, 4, 1);
+        
+        sg_end_pass();
+        sg_pop_debug_group();
+    }
     
     // Begin UI pass for ImGui (separate pass, don't clear color buffer)
     sg_push_debug_group("ui_pass");
@@ -2361,6 +2771,52 @@ void cleanup(void) {
     if (g_state.ground_index_buffer.id != 0) {
         sg_destroy_buffer(g_state.ground_index_buffer);
     }
+    // Clean up TAA resources
+    if (g_state.taa_output_color_attach_view.id != 0) {
+        sg_destroy_view(g_state.taa_output_color_attach_view);
+    }
+    if (g_state.taa_current_color_attach_view.id != 0) {
+        sg_destroy_view(g_state.taa_current_color_attach_view);
+    }
+    if (g_state.taa_history_color_attach_view.id != 0) {
+        sg_destroy_view(g_state.taa_history_color_attach_view);
+    }
+    if (g_state.taa_output_color_view.id != 0) {
+        sg_destroy_view(g_state.taa_output_color_view);
+    }
+    if (g_state.taa_current_color_view.id != 0) {
+        sg_destroy_view(g_state.taa_current_color_view);
+    }
+    if (g_state.taa_current_depth_view.id != 0) {
+        sg_destroy_view(g_state.taa_current_depth_view);
+    }
+    if (g_state.taa_history_color_view.id != 0) {
+        sg_destroy_view(g_state.taa_history_color_view);
+    }
+    if (g_state.taa_output_color.id != 0) {
+        sg_destroy_image(g_state.taa_output_color);
+    }
+    if (g_state.taa_current_color.id != 0) {
+        sg_destroy_image(g_state.taa_current_color);
+    }
+    if (g_state.taa_current_depth.id != 0) {
+        sg_destroy_image(g_state.taa_current_depth);
+    }
+    if (g_state.taa_history_color.id != 0) {
+        sg_destroy_image(g_state.taa_history_color);
+    }
+    if (g_state.taa_pip.id != 0) {
+        sg_destroy_pipeline(g_state.taa_pip);
+    }
+    if (g_state.taa_pip_with_depth.id != 0 && g_state.taa_pip_with_depth.id != g_state.taa_pip.id) {
+        sg_destroy_pipeline(g_state.taa_pip_with_depth);
+    }
+    if (g_state.taa_quad_vbuf.id != 0) {
+        sg_destroy_buffer(g_state.taa_quad_vbuf);
+    }
+    if (g_state.taa_sampler.id != 0) {
+        sg_destroy_sampler(g_state.taa_sampler);
+    }
     sgimgui_discard(&g_state.sgimgui);
     simgui_shutdown();
     sg_shutdown();
@@ -2501,7 +2957,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     _sapp_desc.event_cb = input;
     _sapp_desc.width = 1280;
     _sapp_desc.height = 720;
-    _sapp_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    _sapp_desc.sample_count = 1;  // No MSAA, using TAA for anti-aliasing
     _sapp_desc.window_title = "Simple MMD Renderer";
     _sapp_desc.logger.func = slog_func;
     return _sapp_desc;

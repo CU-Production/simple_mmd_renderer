@@ -71,6 +71,8 @@ set(SHADOW_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/shadow.glsl)
 set(SHADOW_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/shadow.glsl.h)
 set(GROUND_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/ground.glsl)
 set(GROUND_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/ground.glsl.h)
+set(TAA_SHADER_SRC ${CMAKE_SOURCE_DIR}/shader/taa.glsl)
+set(TAA_SHADER_HEADER ${CMAKE_BINARY_DIR}/shader/taa.glsl.h)
 
 # Create shader output directory
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/shader)
@@ -123,8 +125,20 @@ add_custom_command(
     VERBATIM
 )
 
+# Add custom command to compile TAA shader
+add_custom_command(
+    OUTPUT ${TAA_SHADER_HEADER}
+    COMMAND ${SOKOL_SHDC_COMMAND}
+        --input ${TAA_SHADER_SRC}
+        --output ${TAA_SHADER_HEADER}
+        --slang ${SHADER_LANG}
+    DEPENDS ${TAA_SHADER_SRC}
+    COMMENT "Compiling shader ${TAA_SHADER_SRC} -> ${TAA_SHADER_HEADER}"
+    VERBATIM
+)
+
 # Create shader header file target
-add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${IBL_SHADER_HEADER} ${SHADOW_SHADER_HEADER} ${GROUND_SHADER_HEADER})
+add_custom_target(shader_header DEPENDS ${SHADER_HEADER} ${IBL_SHADER_HEADER} ${SHADOW_SHADER_HEADER} ${GROUND_SHADER_HEADER} ${TAA_SHADER_HEADER})
 
 # Include generated shader header file directory
 include_directories(${CMAKE_BINARY_DIR})
