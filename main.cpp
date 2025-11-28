@@ -226,6 +226,10 @@ struct {
     int main_render_target_width = 1280;
     int main_render_target_height = 720;
     bool main_viewport_window_open = true;  // Main viewport window visibility
+    ImVec2 viewport_window_pos = ImVec2(0, 0);  // Viewport window position
+    ImVec2 viewport_window_size = ImVec2(1280, 720);  // Viewport window size
+    ImVec2 viewport_image_pos = ImVec2(0, 0);  // Image position within viewport window
+    ImVec2 viewport_image_size = ImVec2(1280, 720);  // Image display size within viewport window
     
     // Ground plane (stage)
     sg_buffer ground_vertex_buffer = {0};
@@ -1289,17 +1293,31 @@ void TransformStart(float* cameraView, float* cameraProjection, float* matrix) {
     // When useWindow = false, don't call SetDrawlist() - BeginFrame() already set it
     // This matches the official demo behavior
     
-    float windowWidth = useWindow ? (float)ImGui::GetWindowWidth() : io.DisplaySize.x;
-    float windowHeight = useWindow ? (float)ImGui::GetWindowHeight() : io.DisplaySize.y;
-
-    if (!useWindow) {
-        ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
-    } else {
+    // Use viewport window coordinates for ImGuizmo
+    float windowWidth, windowHeight;
+    if (useWindow) {
+        windowWidth = (float)ImGui::GetWindowWidth();
+        windowHeight = (float)ImGui::GetWindowHeight();
         ImGuizmo::SetRect(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y, windowWidth, windowHeight);
+        viewManipulateRight = ImGui::GetWindowPos().x + windowWidth;
+        viewManipulateTop = ImGui::GetWindowPos().y;
+    } else {
+        // Use viewport window position and size if available, otherwise fallback to display size
+        if (g_state.main_viewport_window_open && g_state.viewport_window_size.x > 0 && g_state.viewport_window_size.y > 0) {
+            windowWidth = g_state.viewport_window_size.x;
+            windowHeight = g_state.viewport_window_size.y;
+            ImGuizmo::SetRect(g_state.viewport_window_pos.x, g_state.viewport_window_pos.y, windowWidth, windowHeight);
+            viewManipulateRight = g_state.viewport_window_pos.x + windowWidth;
+            viewManipulateTop = g_state.viewport_window_pos.y;
+        } else {
+            // Fallback to display size if viewport window is not available
+            windowWidth = io.DisplaySize.x;
+            windowHeight = io.DisplaySize.y;
+            ImGuizmo::SetRect(0, 0, windowWidth, windowHeight);
+            viewManipulateRight = windowWidth;
+            viewManipulateTop = 0;
+        }
     }
-    
-    viewManipulateRight = useWindow ? (ImGui::GetWindowPos().x + windowWidth) : io.DisplaySize.x;
-    viewManipulateTop = useWindow ? ImGui::GetWindowPos().y : 0;
     
     if (useWindow) {
         ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -1341,9 +1359,14 @@ void EditTransform(float* cameraView, float* cameraProjection, float* matrix) {
     // Ensure drawlist is set before calling Manipulate
     // When useWindow = false, BeginFrame() should have set it, but we need to ensure it's still valid
     if (!useWindow) {
-        // Use foreground drawlist for full-screen gizmo to ensure it's always valid
+        // Use foreground drawlist for gizmo to ensure it's always valid
         ImGuizmo::SetDrawlist(ImGui::GetForegroundDrawList());
-        ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+        // Use viewport window position and size if available, otherwise fallback to display size
+        if (g_state.main_viewport_window_open && g_state.viewport_window_size.x > 0 && g_state.viewport_window_size.y > 0) {
+            ImGuizmo::SetRect(g_state.viewport_window_pos.x, g_state.viewport_window_pos.y, g_state.viewport_window_size.x, g_state.viewport_window_size.y);
+        } else {
+            ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+        }
     } else {
         float windowWidth = (float)ImGui::GetWindowWidth();
         float windowHeight = (float)ImGui::GetWindowHeight();
@@ -1630,6 +1653,10 @@ void frame(void) {
     // Draw main viewport window (render target display)
     if (g_state.main_viewport_window_open) {
         if (ImGui::Begin("Viewport", &g_state.main_viewport_window_open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+            // Save viewport window position and size for ImGuizmo and camera control
+            g_state.viewport_window_pos = ImGui::GetWindowPos();
+            g_state.viewport_window_size = ImGui::GetWindowSize();
+            
             // Get available content region size
             ImVec2 content_region = ImGui::GetContentRegionAvail();
             
@@ -1666,13 +1693,150 @@ void frame(void) {
                 display_size.y = content_region.x / image_aspect;
             }
             
+            // Ensure display_size is valid (not zero)
+            if (display_size.x <= 0.0f) display_size.x = 1.0f;
+            if (display_size.y <= 0.0f) display_size.y = 1.0f;
+            
             // Center the image
             float x_offset = (content_region.x - display_size.x) * 0.5f;
             float y_offset = (content_region.y - display_size.y) * 0.5f;
+            ImVec2 image_cursor_pos = ImGui::GetCursorPos();
+            
+            // Use InvisibleButton to capture mouse input and prevent window dragging
+            // Place it first at the centered position, then draw image on top
+            ImGui::SetCursorPos(image_cursor_pos);
             if (x_offset > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + x_offset);
             if (y_offset > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + y_offset);
+            ImGui::InvisibleButton("viewport_image", display_size);
             
+            // Check if hovering over or active on the invisible button (must be checked immediately after InvisibleButton)
+            // Use AllowWhenOverlappedByItem flag to detect hover even when Image is drawn on top
+            bool is_hovering_image = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem);
+            bool is_button_active = ImGui::IsItemActive();
+            
+            // Save image position and size for camera control
+            ImVec2 image_screen_pos = ImGui::GetCursorScreenPos();
+            g_state.viewport_image_pos = image_screen_pos;
+            g_state.viewport_image_size = display_size;
+            
+            // Allow image to be drawn on top of the invisible button
+            ImGui::SetNextItemAllowOverlap();
+            // Draw the image on top (at the same position)
+            ImGui::SetCursorPos(image_cursor_pos);
+            if (x_offset > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + x_offset);
+            if (y_offset > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + y_offset);
             ImGui::Image(texture_id, display_size, ImVec2(0, 0), ImVec2(1, 1));
+            
+            // Handle mouse input for camera control when hovering over the invisible button
+            ImGuiIO& io = ImGui::GetIO();
+            bool is_window_focused = ImGui::IsWindowFocused();
+            
+            // Check if mouse is over the image area (using screen coordinates as fallback)
+            bool is_mouse_over_image = false;
+            if (is_hovering_image || is_button_active) {
+                is_mouse_over_image = true;
+            } else {
+                // Fallback: check if mouse is within image bounds using screen coordinates
+                ImVec2 mouse_pos = io.MousePos;
+                if (mouse_pos.x >= image_screen_pos.x && mouse_pos.x <= image_screen_pos.x + display_size.x &&
+                    mouse_pos.y >= image_screen_pos.y && mouse_pos.y <= image_screen_pos.y + display_size.y) {
+                    is_mouse_over_image = true;
+                }
+            }
+            
+            if (is_mouse_over_image && is_window_focused) {
+                // Handle mouse buttons for camera control
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && !ImGuizmo::IsOver()) {
+                    if (!g_state.camera_rotating) {
+                        g_state.camera_rotating = true;
+                        g_state.last_mouse_x = io.MousePos.x;
+                        g_state.last_mouse_y = io.MousePos.y;
+                    } else {
+                        float dx = io.MousePos.x - g_state.last_mouse_x;
+                        float dy = io.MousePos.y - g_state.last_mouse_y;
+                        
+                        // Rotate camera around target
+                        const float rotation_speed = 0.005f;
+                        g_state.camera_rotation_x += dx * rotation_speed;
+                        g_state.camera_rotation_y -= dy * rotation_speed;
+                        
+                        // Clamp vertical rotation to prevent flipping
+                        const float max_angle = 1.57f;  // ~90 degrees
+                        if (g_state.camera_rotation_y > max_angle) {
+                            g_state.camera_rotation_y = max_angle;
+                        }
+                        if (g_state.camera_rotation_y < -max_angle) {
+                            g_state.camera_rotation_y = -max_angle;
+                        }
+                        
+                        g_state.last_mouse_x = io.MousePos.x;
+                        g_state.last_mouse_y = io.MousePos.y;
+                    }
+                } else {
+                    g_state.camera_rotating = false;
+                }
+                
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+                    if (!g_state.camera_panning) {
+                        g_state.camera_panning = true;
+                        g_state.last_mouse_x = io.MousePos.x;
+                        g_state.last_mouse_y = io.MousePos.y;
+                    } else {
+                        float dx = io.MousePos.x - g_state.last_mouse_x;
+                        float dy = io.MousePos.y - g_state.last_mouse_y;
+                        
+                        // Pan camera (move target based on camera's right and up vectors)
+                        float cos_y = cosf(g_state.camera_rotation_y);
+                        float sin_y = sinf(g_state.camera_rotation_y);
+                        float cos_x = cosf(g_state.camera_rotation_x);
+                        float sin_x = sinf(g_state.camera_rotation_x);
+                        
+                        // Right vector (camera's right direction)
+                        HMM_Vec3 right;
+                        right.X = cos_x;
+                        right.Y = 0.0f;
+                        right.Z = -sin_x;
+                        
+                        // Up vector (camera's up direction, considering pitch)
+                        HMM_Vec3 up;
+                        up.X = -sin_y * sin_x;
+                        up.Y = cos_y;
+                        up.Z = -sin_y * cos_x;
+                        
+                        // Pan speed based on camera distance
+                        const float pan_speed = 0.01f;
+                        float pan_factor = pan_speed * g_state.camera_distance;
+                        
+                        // Calculate pan movement
+                        HMM_Vec3 pan_move = HMM_Vec3{0.0f, 0.0f, 0.0f};
+                        pan_move = HMM_Add(pan_move, HMM_MulV3F(right, -dx * pan_factor));
+                        pan_move = HMM_Add(pan_move, HMM_MulV3F(up, dy * pan_factor));
+                        
+                        // Apply pan to camera target
+                        g_state.camera_target = HMM_Add(g_state.camera_target, pan_move);
+                        
+                        g_state.last_mouse_x = io.MousePos.x;
+                        g_state.last_mouse_y = io.MousePos.y;
+                    }
+                } else {
+                    g_state.camera_panning = false;
+                }
+                
+                // Handle mouse wheel for zoom
+                if (io.MouseWheel != 0.0f) {
+                    const float zoom_speed = 0.2f;
+                    g_state.camera_distance -= io.MouseWheel * zoom_speed;
+                    if (g_state.camera_distance < 0.5f) {
+                        g_state.camera_distance = 0.5f;
+                    }
+                    if (g_state.camera_distance > 20.0f) {
+                        g_state.camera_distance = 20.0f;
+                    }
+                }
+            } else {
+                g_state.camera_rotating = false;
+                g_state.camera_panning = false;
+            }
             
             // Display info
             ImGui::Text("Resolution: %dx%d", g_state.main_render_target_width, g_state.main_render_target_height);
