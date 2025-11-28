@@ -1622,6 +1622,11 @@ void frame(void) {
         ImGui::EndMainMenuBar();
     }
     
+    // Create main dockspace (allows all windows to be docked)
+    // DockSpaceOverViewport() automatically fills the entire main viewport
+    // First parameter is dockspace_id (0 = auto-generate), second is viewport (NULL = main viewport)
+    ImGui::DockSpaceOverViewport(0, nullptr, ImGuiDockNodeFlags_None);
+    
     // Draw main viewport window (render target display)
     if (g_state.main_viewport_window_open) {
         if (ImGui::Begin("Viewport", &g_state.main_viewport_window_open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
