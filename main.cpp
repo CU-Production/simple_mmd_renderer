@@ -217,6 +217,16 @@ struct {
     sg_pass_action shadow_pass_action;
     const int shadow_map_size = 2048;
     
+    // Main render target (for rendering to texture instead of swapchain)
+    sg_image main_render_target_color = {0};
+    sg_image main_render_target_depth = {0};
+    sg_view main_render_target_color_view = {0};
+    sg_view main_render_target_depth_view = {0};
+    sg_view main_render_target_texture_view = {0};  // Texture view for ImGui display
+    int main_render_target_width = 1280;
+    int main_render_target_height = 720;
+    bool main_viewport_window_open = true;  // Main viewport window visibility
+    
     // Ground plane (stage)
     sg_buffer ground_vertex_buffer = {0};
     sg_buffer ground_index_buffer = {0};
@@ -894,6 +904,73 @@ void CreateGroundGeometry() {
     g_state.ground_index_buffer = sg_make_buffer(&ibuf_desc);
 }
 
+// Initialize or recreate main render target
+void InitializeMainRenderTarget(int width, int height) {
+    // Destroy existing render targets if they exist
+    if (g_state.main_render_target_texture_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_texture_view);
+    }
+    if (g_state.main_render_target_color_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_color_view);
+    }
+    if (g_state.main_render_target_depth_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_depth_view);
+    }
+    if (g_state.main_render_target_color.id != 0) {
+        sg_destroy_image(g_state.main_render_target_color);
+    }
+    if (g_state.main_render_target_depth.id != 0) {
+        sg_destroy_image(g_state.main_render_target_depth);
+    }
+    
+    // Update size
+    g_state.main_render_target_width = width;
+    g_state.main_render_target_height = height;
+    
+    // Create color render target (non-MSAA for now, can be changed to MSAA with resolve later)
+    // Note: MSAA render targets cannot be directly sampled as textures, so we use non-MSAA
+    // If MSAA is needed, we would need to add a resolve step
+    sg_image_desc color_desc = {};
+    color_desc.type = SG_IMAGETYPE_2D;
+    color_desc.width = width;
+    color_desc.height = height;
+    color_desc.num_mipmaps = 1;
+    color_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+    color_desc.usage.color_attachment = true;
+    color_desc.sample_count = 1;  // Non-MSAA for now (MSAA requires resolve step)
+    color_desc.label = "main-render-target-color";
+    g_state.main_render_target_color = sg_make_image(&color_desc);
+    
+    // Create depth render target
+    sg_image_desc depth_desc = {};
+    depth_desc.type = SG_IMAGETYPE_2D;
+    depth_desc.width = width;
+    depth_desc.height = height;
+    depth_desc.num_mipmaps = 1;
+    depth_desc.pixel_format = SG_PIXELFORMAT_DEPTH;
+    depth_desc.usage.depth_stencil_attachment = true;
+    depth_desc.sample_count = 1;  // Match color render target (non-MSAA for now)
+    depth_desc.label = "main-render-target-depth";
+    g_state.main_render_target_depth = sg_make_image(&depth_desc);
+    
+    // Create views
+    sg_view_desc color_view_desc = {};
+    color_view_desc.color_attachment.image = g_state.main_render_target_color;
+    color_view_desc.label = "main-render-target-color-view";
+    g_state.main_render_target_color_view = sg_make_view(&color_view_desc);
+    
+    sg_view_desc depth_view_desc = {};
+    depth_view_desc.depth_stencil_attachment.image = g_state.main_render_target_depth;
+    depth_view_desc.label = "main-render-target-depth-view";
+    g_state.main_render_target_depth_view = sg_make_view(&depth_view_desc);
+    
+    // Create texture view for ImGui display
+    sg_view_desc texture_view_desc = {};
+    texture_view_desc.texture.image = g_state.main_render_target_color;
+    texture_view_desc.label = "main-render-target-texture-view";
+    g_state.main_render_target_texture_view = sg_make_view(&texture_view_desc);
+}
+
 // Initialize shadow mapping resources
 void InitializeShadowMapping() {
     // Create shadow map (depth texture)
@@ -1291,8 +1368,9 @@ void init(void) {
     // Setup ImGui
     simgui_desc_t _simgui_desc = {};
     _simgui_desc.logger.func = slog_func;
-    _simgui_desc.sample_count = 4;
+    _simgui_desc.sample_count = 1;  // UI doesn't need MSAA
     simgui_setup(&_simgui_desc);
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     
     // Setup sokol-gfx ImGui debug UI
     sgimgui_desc_t _sgimgui_desc = {};
@@ -1313,10 +1391,12 @@ void init(void) {
     
     _sg_pipeline_desc.depth.write_enabled = true;
     _sg_pipeline_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    _sg_pipeline_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;  // Match render target depth format
+    _sg_pipeline_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;  // Match render target color format
     _sg_pipeline_desc.cull_mode = SG_CULLMODE_BACK;
     _sg_pipeline_desc.index_type = SG_INDEXTYPE_UINT32;
     _sg_pipeline_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    _sg_pipeline_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    _sg_pipeline_desc.sample_count = 1;  // Disable MSAA for render target (MSAA requires resolve step)
     _sg_pipeline_desc.label = "model-pipeline";
 
     g_state.pip = sg_make_pipeline(&_sg_pipeline_desc);
@@ -1326,7 +1406,7 @@ void init(void) {
     g_state.main_pass_action.depth = { .load_action = SG_LOADACTION_CLEAR, .clear_value = 1.0f };
 
     // Set UI Pass
-    g_state.ui_pass_action.colors[0] = { .load_action = SG_LOADACTION_LOAD };
+    g_state.ui_pass_action.colors[0] = { .load_action = SG_LOADACTION_CLEAR };
 
     // Initialize time
     stm_setup();
@@ -1340,6 +1420,9 @@ void init(void) {
     // Initialize shadow mapping
     InitializeShadowMapping();
     
+    // Initialize main render target
+    InitializeMainRenderTarget(g_state.main_render_target_width, g_state.main_render_target_height);
+    
     // Create ground pipeline (uses dedicated ground shader with shadows)
     sg_shader ground_shd = sg_make_shader(ground_ground_shader_desc(sg_query_backend()));
     sg_pipeline_desc ground_pip_desc = {};
@@ -1350,10 +1433,12 @@ void init(void) {
     ground_pip_desc.layout.attrs[ATTR_ground_ground_texcoord0] = { .offset = sizeof(float) * 6, .format = SG_VERTEXFORMAT_FLOAT2 };
     ground_pip_desc.depth.write_enabled = true;
     ground_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    ground_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;  // Match render target depth format
+    ground_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;  // Match render target color format
     ground_pip_desc.cull_mode = SG_CULLMODE_BACK;
     ground_pip_desc.index_type = SG_INDEXTYPE_UINT32;
     ground_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    ground_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    ground_pip_desc.sample_count = 1;  // Disable MSAA for render target
     ground_pip_desc.label = "ground-pipeline";
     g_state.ground_pip = sg_make_pipeline(&ground_pip_desc);
     
@@ -1393,9 +1478,11 @@ void init(void) {
     skybox_pip_desc.layout.attrs[ATTR_ibl_skybox_position].format = SG_VERTEXFORMAT_FLOAT3;
     skybox_pip_desc.depth.write_enabled = false;
     skybox_pip_desc.depth.compare = SG_COMPAREFUNC_LESS_EQUAL;
+    skybox_pip_desc.depth.pixel_format = SG_PIXELFORMAT_DEPTH;  // Match render target depth format
+    skybox_pip_desc.colors[0].pixel_format = SG_PIXELFORMAT_RGBA8;  // Match render target color format
     skybox_pip_desc.cull_mode = SG_CULLMODE_FRONT;
     skybox_pip_desc.primitive_type = SG_PRIMITIVETYPE_TRIANGLES;
-    skybox_pip_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    skybox_pip_desc.sample_count = 1;  // Disable MSAA for render target
     skybox_pip_desc.label = "skybox-pipeline";
     g_state.skybox_pip = sg_make_pipeline(&skybox_pip_desc);
     
@@ -1440,6 +1527,14 @@ void frame(void) {
     
     // Begin ImGuizmo frame (must be called after ImGui new frame)
     ImGuizmo::BeginFrame();
+    
+    // Check viewport window size and update render target if needed (before rendering)
+    // This ensures render target is ready before main rendering pass
+    if (g_state.main_viewport_window_open && g_state.main_render_target_texture_view.id != 0) {
+        // We need to check the viewport window size, but we can't do that until ImGui layout is calculated
+        // So we'll do a preliminary check here and update in the viewport window itself
+        // For now, just ensure render target exists
+    }
     
     // Draw menu bar with file operations and debug options
     if (ImGui::BeginMainMenuBar()) {
@@ -1506,6 +1601,7 @@ void frame(void) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Render")) {
+            ImGui::MenuItem("Viewport", nullptr, &g_state.main_viewport_window_open);
             ImGui::MenuItem("Light Controls", nullptr, &g_state.light_window_open);
             ImGui::MenuItem("Materials", nullptr, &g_state.material_window_open);
             ImGui::EndMenu();
@@ -1524,6 +1620,59 @@ void frame(void) {
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
+    }
+    
+    // Draw main viewport window (render target display)
+    if (g_state.main_viewport_window_open) {
+        if (ImGui::Begin("Viewport", &g_state.main_viewport_window_open, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse)) {
+            // Get available content region size
+            ImVec2 content_region = ImGui::GetContentRegionAvail();
+            
+            // Calculate aspect ratio and adjust render target size if window size changed
+            int new_width = (int)content_region.x;
+            int new_height = (int)content_region.y;
+            
+            // Clamp to reasonable minimum size
+            if (new_width < 64) new_width = 64;
+            if (new_height < 64) new_height = 64;
+            
+            // Recreate render target if size changed
+            if (new_width != g_state.main_render_target_width || new_height != g_state.main_render_target_height) {
+                InitializeMainRenderTarget(new_width, new_height);
+            }
+            
+            // Display the render target texture
+            // Convert sg_view to ImTextureID using sokol_imgui helper function
+            ImTextureID texture_id = (ImTextureID)simgui_imtextureid(g_state.main_render_target_texture_view);
+            ImVec2 image_size((float)g_state.main_render_target_width, (float)g_state.main_render_target_height);
+            
+            // Scale image to fit window while maintaining aspect ratio
+            float window_aspect = content_region.x / content_region.y;
+            float image_aspect = image_size.x / image_size.y;
+            
+            ImVec2 display_size;
+            if (window_aspect > image_aspect) {
+                // Window is wider, fit to height
+                display_size.y = content_region.y;
+                display_size.x = content_region.y * image_aspect;
+            } else {
+                // Window is taller, fit to width
+                display_size.x = content_region.x;
+                display_size.y = content_region.x / image_aspect;
+            }
+            
+            // Center the image
+            float x_offset = (content_region.x - display_size.x) * 0.5f;
+            float y_offset = (content_region.y - display_size.y) * 0.5f;
+            if (x_offset > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + x_offset);
+            if (y_offset > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + y_offset);
+            
+            ImGui::Image(texture_id, display_size, ImVec2(0, 0), ImVec2(1, 1));
+            
+            // Display info
+            ImGui::Text("Resolution: %dx%d", g_state.main_render_target_width, g_state.main_render_target_height);
+        }
+        ImGui::End();
     }
     
     // Draw camera debug window
@@ -1894,7 +2043,7 @@ void frame(void) {
     g_state.camera_pos = HMM_Add(g_state.camera_target, camera_offset);
     
     // Calculate MVP matrix
-    HMM_Mat4 proj = HMM_Perspective_RH_ZO(g_state.camera_fov * HMM_DegToRad, (float)width / (float)height, 0.1f, 1000.0f);
+    HMM_Mat4 proj = HMM_Perspective_RH_ZO(g_state.camera_fov * HMM_DegToRad, (float)g_state.main_render_target_width / (float)g_state.main_render_target_height, 0.1f, 1000.0f);
     HMM_Mat4 view = HMM_LookAt_RH(g_state.camera_pos, g_state.camera_target, HMM_Vec3{0.0f, 1.0f, 0.0f});
     
     // Convert model matrix from ImGuizmo format (column-major float array) to HMM_Mat4
@@ -2051,14 +2200,18 @@ void frame(void) {
         sg_pop_debug_group();
     }
 
-    // Begin main rendering pass
+    // Begin main rendering pass (render to texture instead of swapchain)
     sg_push_debug_group("main pass");
     sg_pass _sg_pass{};
     _sg_pass.action = g_state.main_pass_action;
-    _sg_pass.swapchain = sglue_swapchain();
+    _sg_pass.attachments.colors[0] = g_state.main_render_target_color_view;
+    _sg_pass.attachments.depth_stencil = g_state.main_render_target_depth_view;
     _sg_pass.label = "main pass";
 
     sg_begin_pass(&_sg_pass);
+    
+    // Set viewport to match render target size
+    sg_apply_viewport(0, 0, g_state.main_render_target_width, g_state.main_render_target_height, false);
 
     // Draw skybox first (before model, but with depth test)
     if (g_state.ibl_initialized && g_state.show_skybox && g_state.environment_cubemap.id != 0 && g_state.skybox_vertex_buffer.id != 0) {
@@ -2361,6 +2514,24 @@ void cleanup(void) {
     if (g_state.ground_index_buffer.id != 0) {
         sg_destroy_buffer(g_state.ground_index_buffer);
     }
+    
+    // Clean up main render target resources
+    if (g_state.main_render_target_texture_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_texture_view);
+    }
+    if (g_state.main_render_target_color_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_color_view);
+    }
+    if (g_state.main_render_target_depth_view.id != 0) {
+        sg_destroy_view(g_state.main_render_target_depth_view);
+    }
+    if (g_state.main_render_target_color.id != 0) {
+        sg_destroy_image(g_state.main_render_target_color);
+    }
+    if (g_state.main_render_target_depth.id != 0) {
+        sg_destroy_image(g_state.main_render_target_depth);
+    }
+    
     sgimgui_discard(&g_state.sgimgui);
     simgui_shutdown();
     sg_shutdown();
@@ -2501,7 +2672,7 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     _sapp_desc.event_cb = input;
     _sapp_desc.width = 1280;
     _sapp_desc.height = 720;
-    _sapp_desc.sample_count = 4;  // Enable 4x MSAA for anti-aliasing
+    _sapp_desc.sample_count = 1;  // Disable MSAA for swapchain (main rendering uses render target)
     _sapp_desc.window_title = "Simple MMD Renderer";
     _sapp_desc.logger.func = slog_func;
     return _sapp_desc;
