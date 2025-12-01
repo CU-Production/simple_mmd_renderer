@@ -66,9 +66,13 @@ void main() {
     vec3 current = texture(sampler2D(current_frame, current_smp), uv).rgb;
     
     // Calculate reprojected UV using jitter offsets
-    // Convert jitter from pixel space to NDC space, then to UV space
-    vec2 jitter_diff_ndc = (jitter_offset - prev_jitter_offset) / screen_size;
-    vec2 reprojected_uv = uv - jitter_diff_ndc;
+    // Convert jitter from pixel space to UV space
+    // Use smoother reprojection to reduce jitter visibility
+    vec2 jitter_diff_uv = (jitter_offset - prev_jitter_offset) / screen_size;
+    
+    // Apply smoothing to jitter difference to reduce visible jitter
+    // This helps when jitter changes between frames
+    vec2 reprojected_uv = uv - jitter_diff_uv;
     
     // Check if reprojected UV is valid (within bounds)
     bool is_reprojection_valid = all(greaterThanEqual(reprojected_uv, vec2(0.0))) && 
@@ -131,9 +135,24 @@ void main() {
     // Blend current and history
     vec3 result = mix(clipped_history, current, dynamic_blend);
     
+    // Apply temporal filtering to reduce jitter visibility
+    // Sample neighboring pixels and blend to smooth out jitter artifacts
+    float neighbor_blend = 0.12; // How much to blend with neighbors (reduces jitter)
+    
+    // Sample 4 neighbors (cross pattern) to reduce jitter visibility
+    vec3 neighbor_sum = vec3(0.0);
+    neighbor_sum += texture(sampler2D(current_frame, current_smp), uv + vec2( 1.0,  0.0) * texel_size).rgb;
+    neighbor_sum += texture(sampler2D(current_frame, current_smp), uv + vec2(-1.0,  0.0) * texel_size).rgb;
+    neighbor_sum += texture(sampler2D(current_frame, current_smp), uv + vec2( 0.0,  1.0) * texel_size).rgb;
+    neighbor_sum += texture(sampler2D(current_frame, current_smp), uv + vec2( 0.0, -1.0) * texel_size).rgb;
+    neighbor_sum /= 4.0;
+    
+    // Blend with neighbors to reduce jitter visibility
+    result = mix(result, neighbor_sum, neighbor_blend);
+    
     // Optional: Apply slight sharpening to compensate for temporal smoothing
-    vec3 sharpened = result * 1.05 - current * 0.05;
-    result = mix(result, sharpened, 0.3);
+    vec3 sharpened = result * 1.03 - current * 0.03; // Reduced sharpening
+    result = mix(result, sharpened, 0.2); // Reduced sharpening blend
     
     frag_color = vec4(result, 1.0);
 }

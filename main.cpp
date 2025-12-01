@@ -261,6 +261,7 @@ struct {
     HMM_Vec2 taa_prev_jitter_offset = {0.0f, 0.0f};
     int taa_jitter_index = 0;
     float taa_blend_factor = 0.1f; // TAA blend factor (0.05-0.2 typical)
+    float taa_jitter_scale = 0.35f; // Jitter scale (0.2-0.5 typical, lower = less visible)
     int taa_width = 0;
     int taa_height = 0;
 } g_state;
@@ -995,15 +996,19 @@ float GetHaltonValue(int index, int base) {
     return result;
 }
 
-// Get 2D jitter offset for TAA (using Halton sequence)
+// Get 2D jitter offset for TAA (using improved Halton sequence)
 HMM_Vec2 GetTAAJitter(int frame_index) {
     // Use Halton(2,3) sequence for good distribution
-    float jitter_x = GetHaltonValue(frame_index, 2);
-    float jitter_y = GetHaltonValue(frame_index, 3);
+    // Cycle through 8 samples for better coverage
+    int sample_index = frame_index % 8;
+    float jitter_x = GetHaltonValue(sample_index, 2);
+    float jitter_y = GetHaltonValue(sample_index, 3);
     
-    // Convert to pixel offset (typically -0.5 to 0.5 pixels)
-    // For better quality, we can use sub-pixel jitter
-    float jitter_scale = 0.5f; // Half pixel jitter
+    // Use configurable jitter scale from state
+    // Smaller jitter = less visible but still effective for TAA
+    float jitter_scale = g_state.taa_jitter_scale;
+    
+    // Convert from [0,1] to [-1,1] and scale
     return HMM_Vec2{
         (jitter_x * 2.0f - 1.0f) * jitter_scale,
         (jitter_y * 2.0f - 1.0f) * jitter_scale
@@ -1910,6 +1915,11 @@ void frame(void) {
             ImGui::Text("Blend factor controls how much of the current frame vs history is used.");
             ImGui::Text("Lower values = more temporal smoothing but more ghosting");
             ImGui::Text("Higher values = less ghosting but less effective anti-aliasing");
+            ImGui::Separator();
+            ImGui::DragFloat("Jitter Scale", &g_state.taa_jitter_scale, 0.01f, 0.2f, 0.5f);
+            ImGui::Text("Jitter scale controls the amount of sub-pixel jitter.");
+            ImGui::Text("Lower values = less visible jitter but may reduce AA quality");
+            ImGui::Text("Higher values = better AA but more visible jitter");
             ImGui::Separator();
             ImGui::Text("Jitter Index: %d", g_state.taa_jitter_index);
             ImGui::Text("Current Jitter: (%.3f, %.3f)", g_state.taa_jitter_offset.X, g_state.taa_jitter_offset.Y);
