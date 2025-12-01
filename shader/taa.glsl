@@ -36,88 +36,104 @@ layout(binding=3) uniform taa_params {
     float blend_factor;       // TAA blend factor (typically 0.05-0.2)
 };
 
-// Clamp history color to neighborhood of current color to reduce ghosting
+// Improved AABB clipping algorithm to reduce ghosting
 vec3 ClipToAABB(vec3 color, vec3 min_color, vec3 max_color) {
     vec3 center = (min_color + max_color) * 0.5;
     vec3 extents = max_color - center;
     
-    // Clamp to AABB
+    // Clamp to AABB - find the minimum scale factor across all axes
     vec3 dist = color - center;
-    vec3 clamped = dist;
-    
-    // Find the axis that needs the most clamping
     vec3 abs_dist = abs(dist);
     vec3 abs_extents = abs(extents);
     
+    // Find minimum scale factor that keeps color within AABB
+    float min_scale = 1.0;
     for (int i = 0; i < 3; i++) {
-        if (abs_extents[i] > 0.0001) {
-            float scale = abs_extents[i] / max(abs_dist[i], 0.0001);
-            if (scale < 1.0) {
-                clamped = dist * scale;
-            }
+        if (abs_extents[i] > 0.0001 && abs_dist[i] > abs_extents[i]) {
+            float scale = abs_extents[i] / abs_dist[i];
+            min_scale = min(min_scale, scale);
         }
     }
     
-    return center + clamped;
-}
-
-// Sample 3x3 neighborhood for color clamping
-vec3 GetNeighborhoodMin(vec2 uv) {
-    vec2 texel_size = 1.0 / screen_size;
-    vec3 min_color = vec3(1e6);
-    
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 offset = vec2(float(x), float(y)) * texel_size;
-            vec3 color = texture(sampler2D(current_frame, current_smp), uv + offset).rgb;
-            min_color = min(min_color, color);
-        }
-    }
-    return min_color;
-}
-
-vec3 GetNeighborhoodMax(vec2 uv) {
-    vec2 texel_size = 1.0 / screen_size;
-    vec3 max_color = vec3(-1e6);
-    
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 offset = vec2(float(x), float(y)) * texel_size;
-            vec3 color = texture(sampler2D(current_frame, current_smp), uv + offset).rgb;
-            max_color = max(max_color, color);
-        }
-    }
-    return max_color;
+    // Apply the minimum scale to all axes to keep color within AABB
+    return center + dist * min_scale;
 }
 
 void main() {
     vec2 texel_size = 1.0 / screen_size;
     
-    // Sample current frame
+    // Sample current frame with bilinear filtering
     vec3 current = texture(sampler2D(current_frame, current_smp), uv).rgb;
     
     // Calculate reprojected UV using jitter offsets
-    vec2 reprojected_uv = uv;
-    // Reproject using depth and jitter difference
-    // For simplicity, we use a basic reprojection based on jitter
-    vec2 jitter_diff = (jitter_offset - prev_jitter_offset) * texel_size;
-    reprojected_uv = uv - jitter_diff;
+    // Convert jitter from pixel space to NDC space, then to UV space
+    vec2 jitter_diff_ndc = (jitter_offset - prev_jitter_offset) / screen_size;
+    vec2 reprojected_uv = uv - jitter_diff_ndc;
+    
+    // Check if reprojected UV is valid (within bounds)
+    bool is_reprojection_valid = all(greaterThanEqual(reprojected_uv, vec2(0.0))) && 
+                                  all(lessThanEqual(reprojected_uv, vec2(1.0)));
     
     // Clamp reprojected UV to valid range
     reprojected_uv = clamp(reprojected_uv, vec2(0.0), vec2(1.0));
     
-    // Sample history frame
+    // Sample history frame with bilinear filtering
     vec3 history = texture(sampler2D(history_frame, history_smp), reprojected_uv).rgb;
     
     // Get neighborhood for color clamping (reduces ghosting)
-    vec3 min_color = GetNeighborhoodMin(uv);
-    vec3 max_color = GetNeighborhoodMax(uv);
+    // Use 3x3 neighborhood for better clamping
+    vec3 min_color = vec3(1e6);
+    vec3 max_color = vec3(-1e6);
+    
+    // Sample 3x3 neighborhood
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec2 offset = vec2(float(x), float(y)) * texel_size;
+            vec3 sample_color = texture(sampler2D(current_frame, current_smp), uv + offset).rgb;
+            min_color = min(min_color, sample_color);
+            max_color = max(max_color, sample_color);
+        }
+    }
+    
+    // Expand AABB slightly to allow for small variations (reduces over-clipping)
+    vec3 center = (min_color + max_color) * 0.5;
+    vec3 extents = max_color - center;
+    extents *= 1.1; // Expand by 10%
+    min_color = center - extents;
+    max_color = center + extents;
     
     // Clamp history to neighborhood
-    history = ClipToAABB(history, min_color, max_color);
+    vec3 clipped_history = ClipToAABB(history, min_color, max_color);
+    
+    // Calculate reprojection confidence based on UV distance
+    vec2 reprojection_error = abs(reprojected_uv - uv);
+    float max_error = max(reprojection_error.x, reprojection_error.y);
+    float confidence = 1.0 - smoothstep(0.0, 0.1, max_error); // Confidence decreases with reprojection error
+    
+    // If reprojection is invalid or has high error, reduce history contribution
+    if (!is_reprojection_valid) {
+        confidence = 0.0;
+    }
+    
+    // Dynamic blend factor based on confidence
+    float dynamic_blend = mix(blend_factor * 0.5, blend_factor * 2.0, confidence);
+    dynamic_blend = clamp(dynamic_blend, 0.05, 0.3); // Clamp to reasonable range
+    
+    // Calculate color difference to detect disocclusions
+    float color_diff = length(clipped_history - current);
+    float color_threshold = 0.1; // Threshold for detecting disocclusions
+    
+    // Increase blend factor if color difference is large (likely disocclusion)
+    if (color_diff > color_threshold) {
+        dynamic_blend = min(dynamic_blend * 2.0, 0.5);
+    }
     
     // Blend current and history
-    vec3 result = mix(history, current, blend_factor);
+    vec3 result = mix(clipped_history, current, dynamic_blend);
+    
+    // Optional: Apply slight sharpening to compensate for temporal smoothing
+    vec3 sharpened = result * 1.05 - current * 0.05;
+    result = mix(result, sharpened, 0.3);
     
     frag_color = vec4(result, 1.0);
 }
