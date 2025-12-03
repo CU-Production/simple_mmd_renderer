@@ -231,12 +231,20 @@ struct {
     bool light_window_open = false;
     bool material_window_open = false;
 
-    // Figure/Resin material parameters
-    float rim_power = 2.0f; // Rim light power (higher = sharper rim, typical: 2.0-5.0)
-    float rim_intensity = 0.2f; // Rim light intensity (typical: 0.5-2.0)
-    HMM_Vec3 rim_color = {1.0f, 1.0f, 1.0f}; // Rim light color (white for neutral, can be tinted)
-    float specular_power = 64.0f; // Specular highlight power (higher = sharper, typical: 32.0-128.0)
-    float specular_intensity = 1.0f; // Specular highlight intensity (typical: 0.5-2.0)
+    // Figure/Resin material parameters - tuned for plastic figure look
+    float roughness = 0.32f;           // Smooth plastic surface
+    float metallic = 0.0f;             // Plastic = 0
+    float subsurface = 0.55f;          // SSS for plastic translucency
+    float clearcoat = 0.55f;           // Clear coat / varnish layer (key for plastic shine)
+    float clearcoat_roughness = 0.12f; // Sharp clear coat reflection
+    
+    float rim_power = 2.2f;            // Rim light power
+    float rim_intensity = 0.4f;        // Visible rim highlight
+    HMM_Vec3 rim_color = {1.0f, 0.97f, 0.93f}; // Warm rim
+    
+    float ambient_intensity = 0.32f;   // Ambient light
+    HMM_Vec3 subsurface_color = {1.0f, 0.55f, 0.35f}; // Warm orange SSS
+    float env_reflection_intensity = 0.4f; // Environment reflection for shine
 } g_state;
 
 
@@ -1595,33 +1603,150 @@ void frame(void) {
     }
 
     if (g_state.material_window_open) {
-        if (ImGui::Begin("Materials", &g_state.material_window_open)) {
-            ImGui::Text("MMD Material");
+        if (ImGui::Begin("Figure Material", &g_state.material_window_open)) {
+            ImGui::Text("Figure/Resin Material (PBR)");
             ImGui::Separator();
-
-            // Rim light parameters
-            ImGui::Text("Rim Light (Edge Highlight):");
-            ImGui::DragFloat("Rim Power", &g_state.rim_power, 0.1f, 1.0f, 10.0f);
-            ImGui::DragFloat("Rim Intensity", &g_state.rim_intensity, 0.1f, 0.0f, 3.0f);
-            float rim_col[3] = {g_state.rim_color.X, g_state.rim_color.Y, g_state.rim_color.Z};
-            if (ImGui::ColorEdit3("Rim Color", rim_col)) {
-                g_state.rim_color = HMM_Vec3{rim_col[0], rim_col[1], rim_col[2]};
+            
+            // === Surface Properties ===
+            if (ImGui::CollapsingHeader("Surface Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Roughness", &g_state.roughness, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Surface roughness (0 = mirror, 1 = matte)");
+                
+                ImGui::SliderFloat("Metallic", &g_state.metallic, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Metallic factor (0 = plastic/skin, 1 = metal)");
             }
-
+            
+            // === Clear Coat (Varnish Layer) ===
+            if (ImGui::CollapsingHeader("Clear Coat (Varnish)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Clearcoat", &g_state.clearcoat, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Clear coat intensity (figure varnish layer)");
+                
+                ImGui::SliderFloat("Clearcoat Roughness", &g_state.clearcoat_roughness, 0.0f, 0.5f, "%.2f");
+                ImGui::SetItemTooltip("Clear coat surface roughness");
+            }
+            
+            // === Subsurface Scattering ===
+            if (ImGui::CollapsingHeader("Subsurface Scattering (SSS)", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("SSS Intensity", &g_state.subsurface, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Subsurface scattering intensity (light penetration)");
+                
+                float sss_col[3] = {g_state.subsurface_color.X, g_state.subsurface_color.Y, g_state.subsurface_color.Z};
+                if (ImGui::ColorEdit3("SSS Color", sss_col)) {
+                    g_state.subsurface_color = HMM_Vec3{sss_col[0], sss_col[1], sss_col[2]};
+                }
+                ImGui::SetItemTooltip("Subsurface tint color (warm for skin)");
+            }
+            
+            // === Rim Light ===
+            if (ImGui::CollapsingHeader("Rim Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Rim Power", &g_state.rim_power, 1.0f, 10.0f, "%.1f");
+                ImGui::SetItemTooltip("Rim light sharpness");
+                
+                ImGui::SliderFloat("Rim Intensity", &g_state.rim_intensity, 0.0f, 2.0f, "%.2f");
+                ImGui::SetItemTooltip("Rim light brightness");
+                
+                float rim_col[3] = {g_state.rim_color.X, g_state.rim_color.Y, g_state.rim_color.Z};
+                if (ImGui::ColorEdit3("Rim Color", rim_col)) {
+                    g_state.rim_color = HMM_Vec3{rim_col[0], rim_col[1], rim_col[2]};
+                }
+            }
+            
+            // === Environment & Ambient ===
+            if (ImGui::CollapsingHeader("Environment Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Ambient Intensity", &g_state.ambient_intensity, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Base ambient light level");
+                
+                ImGui::SliderFloat("Env Reflection", &g_state.env_reflection_intensity, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Environment map reflection intensity");
+            }
+            
             ImGui::Separator();
-
-            // Specular highlight parameters
-            ImGui::Text("Specular Highlight:");
-            ImGui::DragFloat("Specular Power", &g_state.specular_power, 1.0f, 1.0f, 256.0f);
-            ImGui::DragFloat("Specular Intensity", &g_state.specular_intensity, 0.1f, 0.0f, 3.0f);
-
-            ImGui::Separator();
-            ImGui::Text("Light Info:");
-            ImGui::Text("Direction: (%.3f, %.3f, %.3f)",
-                g_state.light_direction.X, g_state.light_direction.Y, g_state.light_direction.Z);
-            ImGui::Text("Color: (%.3f, %.3f, %.3f)",
-                g_state.light_color.X, g_state.light_color.Y, g_state.light_color.Z);
-            ImGui::Text("Intensity: %.2f", g_state.light_intensity);
+            
+            // === Presets ===
+            ImGui::Text("Material Presets:");
+            if (ImGui::Button("Glossy Plastic")) {
+                // High-quality painted figure with clear coat
+                g_state.roughness = 0.25f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.7f;
+                g_state.clearcoat_roughness = 0.08f;
+                g_state.subsurface = 0.5f;
+                g_state.subsurface_color = {1.0f, 0.5f, 0.3f};
+                g_state.rim_power = 2.0f;
+                g_state.rim_intensity = 0.45f;
+                g_state.ambient_intensity = 0.28f;
+                g_state.env_reflection_intensity = 0.5f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Matte Plastic")) {
+                // Matte/satin finish figure
+                g_state.roughness = 0.5f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.15f;
+                g_state.clearcoat_roughness = 0.3f;
+                g_state.subsurface = 0.55f;
+                g_state.subsurface_color = {1.0f, 0.55f, 0.4f};
+                g_state.rim_power = 2.5f;
+                g_state.rim_intensity = 0.3f;
+                g_state.ambient_intensity = 0.38f;
+                g_state.env_reflection_intensity = 0.2f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Skin")) {
+                // Plastic skin with warm SSS
+                g_state.roughness = 0.38f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.35f;
+                g_state.clearcoat_roughness = 0.18f;
+                g_state.subsurface = 0.7f;
+                g_state.subsurface_color = {1.0f, 0.4f, 0.25f};
+                g_state.rim_power = 1.8f;
+                g_state.rim_intensity = 0.4f;
+                g_state.ambient_intensity = 0.32f;
+                g_state.env_reflection_intensity = 0.3f;
+            }
+            
+            if (ImGui::Button("Hair")) {
+                // Plastic hair with anisotropic-like shine
+                g_state.roughness = 0.35f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.6f;
+                g_state.clearcoat_roughness = 0.12f;
+                g_state.subsurface = 0.3f;
+                g_state.subsurface_color = {0.9f, 0.7f, 0.5f};
+                g_state.rim_power = 1.8f;
+                g_state.rim_intensity = 0.55f;
+                g_state.ambient_intensity = 0.28f;
+                g_state.env_reflection_intensity = 0.45f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cloth")) {
+                // Fabric-like plastic
+                g_state.roughness = 0.6f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.0f;
+                g_state.clearcoat_roughness = 0.4f;
+                g_state.subsurface = 0.25f;
+                g_state.subsurface_color = {0.85f, 0.7f, 0.6f};
+                g_state.rim_power = 2.8f;
+                g_state.rim_intensity = 0.25f;
+                g_state.ambient_intensity = 0.4f;
+                g_state.env_reflection_intensity = 0.08f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Metal")) {
+                // Metallic paint or chrome parts
+                g_state.roughness = 0.3f;
+                g_state.metallic = 0.9f;
+                g_state.clearcoat = 0.0f;
+                g_state.clearcoat_roughness = 0.1f;
+                g_state.subsurface = 0.0f;
+                g_state.subsurface_color = {1.0f, 1.0f, 1.0f};
+                g_state.rim_power = 3.5f;
+                g_state.rim_intensity = 0.2f;
+                g_state.ambient_intensity = 0.22f;
+                g_state.env_reflection_intensity = 0.75f;
+            }
         }
         ImGui::End();
     }
@@ -2089,26 +2214,42 @@ void frame(void) {
     }
     
     // Model mode: draw loaded model (render by parts/materials)
-    // Simplified: only albedo + rim light, no IBL or directional light
+    // PBR-based figure/resin material rendering with IBL
     if (g_state.model_loaded && g_state.vertex_buffer.id != 0 && g_state.index_buffer.id != 0) {
         sg_apply_pipeline(g_state.pip);
         
-        // Update VS params (no light_mvp needed anymore)
+        // Update VS params
         mmd_vs_params_t vs_params;
         vs_params.mvp = mvp;
         vs_params.model = model_mat;
         
-        // FS params: view_pos, rim light, and specular parameters
+        // FS params: PBR figure material parameters
         mmd_fs_params_t fs_params;
         fs_params.view_pos = g_state.camera_pos;
+        fs_params._pad0 = 0.0f;
+        
+        // Light parameters
+        fs_params.light_direction = g_state.light_direction;
+        fs_params.light_intensity = g_state.light_intensity;
+        fs_params.light_color = g_state.light_color;
+        fs_params._pad1 = 0.0f;
+        
+        // PBR surface parameters
+        fs_params.roughness = g_state.roughness;
+        fs_params.metallic = g_state.metallic;
+        fs_params.subsurface = g_state.subsurface;
+        fs_params.clearcoat = g_state.clearcoat;
+        
+        fs_params.clearcoat_roughness = g_state.clearcoat_roughness;
         fs_params.rim_power = g_state.rim_power;
         fs_params.rim_intensity = g_state.rim_intensity;
+        fs_params.ambient_intensity = g_state.ambient_intensity;
+        
         fs_params.rim_color = g_state.rim_color;
-        fs_params.specular_power = g_state.specular_power;
-        fs_params.specular_intensity = g_state.specular_intensity;
-        fs_params.light_direction = g_state.light_direction;
-        fs_params.light_color = g_state.light_color;
-        fs_params.light_intensity = g_state.light_intensity;
+        fs_params._pad2 = 0.0f;
+        
+        fs_params.subsurface_color = g_state.subsurface_color;
+        fs_params.env_reflection_intensity = g_state.env_reflection_intensity;
         
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
@@ -2128,13 +2269,19 @@ void frame(void) {
                 ? g_state.material_texture_views[part_idx]
                 : g_state.default_texture_view;
             
-            // Bind only diffuse texture (slot 0)
+            // Bind diffuse texture (slot 0)
             bind.views[0] = material_view;
             bind.samplers[0] = g_state.default_sampler;
             
+            // Bind environment cubemap for reflections (slot 1)
+            if (g_state.environment_cubemap_view.id != 0) {
+                bind.views[1] = g_state.environment_cubemap_view;
+                bind.samplers[1] = g_state.default_sampler;
+            }
+            
             sg_apply_bindings(&bind);
             sg_apply_uniforms(0, SG_RANGE(vs_params));
-            sg_apply_uniforms(1, SG_RANGE(fs_params)); // fs_params is now binding 1
+            sg_apply_uniforms(2, SG_RANGE(fs_params)); // fs_params is now binding 2
 
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);
