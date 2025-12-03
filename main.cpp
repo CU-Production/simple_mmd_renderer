@@ -1429,6 +1429,7 @@ void frame(void) {
     
     int width = sapp_width();
     int height = sapp_height();
+    sg_swapchain _sg_swapchain = sglue_swapchain();
     
     // Setup ImGui frame
     simgui_frame_desc_t simgui_frame = {};
@@ -2055,7 +2056,7 @@ void frame(void) {
     sg_push_debug_group("main pass");
     sg_pass _sg_pass{};
     _sg_pass.action = g_state.main_pass_action;
-    _sg_pass.swapchain = sglue_swapchain();
+    _sg_pass.swapchain = _sg_swapchain;
     _sg_pass.label = "main pass";
 
     sg_begin_pass(&_sg_pass);
@@ -2185,17 +2186,17 @@ void frame(void) {
     }
     
     // End model rendering pass
-    sg_end_pass();
-    sg_pop_debug_group();
-    
+    // sg_end_pass();
+    // sg_pop_debug_group();
+
     // Begin UI pass for ImGui (separate pass, don't clear color buffer)
-    sg_push_debug_group("ui_pass");
-    sg_pass ui_pass = {};
-    ui_pass.action = g_state.ui_pass_action;
-    ui_pass.swapchain = sglue_swapchain();
-    ui_pass.label = "ui_pass";
-    sg_begin_pass(&ui_pass);
-    
+    // sg_push_debug_group("ui_pass");
+    // sg_pass ui_pass = {};
+    // ui_pass.action = g_state.ui_pass_action;
+    // ui_pass.swapchain = _sg_swapchain;
+    // ui_pass.label = "ui_pass";
+    // sg_begin_pass(&ui_pass);
+
     // Draw ImGuizmo gizmo if enabled
     // Must be called in ImGui context, after all ImGui windows but before simgui_render()
     // Following the official demo pattern: https://github.com/CedricGuillemet/ImGuizmo/blob/master/example/main.cpp
@@ -2203,7 +2204,7 @@ void frame(void) {
         // Convert view and projection matrices to float arrays for ImGuizmo
         float view_array[16];
         float proj_array[16];
-        
+
         // After transposition, copy by columns: array[col*4 + row] = transposed.Elements[row][col]
         // This is equivalent to copying the original matrix by rows
         for (int col = 0; col < 4; col++) {
@@ -2215,14 +2216,14 @@ void frame(void) {
 
         // Set orthographic mode (must be called before using gizmo, like in official demo)
         ImGuizmo::SetOrthographic(false);  // We're using perspective projection
-        
+
         // Note: BeginFrame() is already called at the start of frame() function (line 560)
         // Following official demo pattern: TransformStart -> EditTransform -> TransformEnd
         TransformStart(view_array, proj_array, g_state.model_matrix);
         EditTransform(view_array, proj_array, g_state.model_matrix);
         TransformEnd();
     }
-    
+
     // Draw Sequencer window if enabled
     if (g_state.sequencer_enabled && g_state.motion_loaded && g_state.sequencer) {
         if (ImGui::Begin("Animation Sequencer", &g_state.sequencer_enabled)) {
@@ -2250,14 +2251,14 @@ void frame(void) {
             ImGui::Text("Frame: %d / %d", g_state.sequencer_current_frame, g_state.sequencer ? g_state.sequencer->GetFrameMax() : 0);
             ImGui::SameLine();
             ImGui::Text("Time: %.2fs", g_state.time);
-            
+
             ImGui::Separator();
-            
+
             // Draw sequencer timeline
             // Store frame before sequencer call to detect manual changes
             int previous_frame = g_state.sequencer_current_frame;
             bool was_playing = g_state.animation_playing;
-            
+
             // Call sequencer - this may modify sequencer_current_frame if user drags
             ImSequencer::Sequencer(
                 g_state.sequencer.get(),
@@ -2267,7 +2268,7 @@ void frame(void) {
                 &g_state.sequencer_first_frame,
                 ImSequencer::SEQUENCER_CHANGE_FRAME
             );
-            
+
             // Check if user manually dragged the frame marker in sequencer
             // ImSequencer modifies currentFrame when user drags in the top timeline area
             if (previous_frame != g_state.sequencer_current_frame) {
@@ -2277,7 +2278,7 @@ void frame(void) {
                     // Frame is significantly different from expected - this is a manual drag
                     g_state.time = g_state.sequencer_current_frame / 30.0f;
                     g_state.sequencer_last_frame = g_state.sequencer_current_frame;
-                    
+
                     // If was playing, pause it
                     if (was_playing) {
                         g_state.animation_playing = false;
@@ -2288,14 +2289,14 @@ void frame(void) {
                     g_state.sequencer_last_frame = g_state.sequencer_current_frame;
                 }
             }
-            
+
             ImGui::End();
         }
     }
 
     // Render ImGui
     simgui_render();
-    
+
     // End UI pass
     sg_end_pass();
     sg_pop_debug_group();

@@ -15,6 +15,7 @@ endif()
 
 # Windows-specific settings
 if(WIN32)
+    find_package(Vulkan REQUIRED)
     add_definitions(-DSOKOL_VULKAN)
 #    add_definitions(-DSOKOL_D3D11)
 #    add_definitions(-DSOKOL_GLCORE)
@@ -22,6 +23,7 @@ endif()
 
 # Linux-specific settings
 if(UNIX AND NOT APPLE)
+    find_package(Vulkan REQUIRED)
 #    add_definitions(-DSOKOL_VULKAN)
     add_definitions(-DSOKOL_GLCORE)
 endif()
@@ -144,3 +146,6 @@ add_custom_command(
     TARGET simple_mmd_renderer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory ARGS "${CMAKE_CURRENT_SOURCE_DIR}/assets" "${CMAKE_CURRENT_BINARY_DIR}/assets"
 )
+if (NOT APPLE)
+    target_link_libraries(simple_mmd_renderer PRIVATE Vulkan::Vulkan)
+endif ()
