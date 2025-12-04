@@ -698,6 +698,9 @@ bool LoadPMXModel(const std::string& filename) {
         std::cout << "  Triangles: " << g_state.model->GetTriangleNum() << std::endl;
         std::cout << "  Bones: " << g_state.model->GetBoneNum() << std::endl;
         std::cout << "  Parts: " << g_state.model->GetPartNum() << std::endl;
+        // for (size_t i = 0; i < g_state.model->GetPartNum(); ++i) {
+        //     std::cout << "    Part[" << i << "]: " << wstring_to_utf8(g_state.model->GetPart(i).GetMaterial().GetName()) << std::endl;
+        // }
         
         // Load material textures (pass filename for path resolution)
         LoadMaterialTextures(filename);
