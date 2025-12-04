@@ -193,14 +193,20 @@ struct {
     int sequencer_last_frame = -1;  // Track last frame to detect manual changes
     
     // Skybox resources
-    sg_image environment_cubemap = {0};
-    sg_view environment_cubemap_view = {0}; // Persistent view for environment cubemap
+    sg_image environment_cubemap = {0};      // High-res cubemap for skybox rendering
+    sg_view environment_cubemap_view = {0};
+    sg_image prefiltered_cubemap = {0};      // Prefiltered environment map (with mips for roughness)
+    sg_view prefiltered_cubemap_view = {0};
+    sg_image irradiance_cubemap = {0};       // Diffuse irradiance map
+    sg_view irradiance_cubemap_view = {0};
     sg_sampler default_sampler = {0};
+    sg_sampler cubemap_sampler = {0};        // Sampler with mip filtering for prefiltered env map
     sg_pipeline skybox_pip = {0};
     sg_buffer skybox_vertex_buffer = {0};
     sg_buffer skybox_index_buffer = {0};
     bool ibl_initialized = false;
     bool show_skybox = true;
+    int prefilter_mip_levels = 5;            // Number of mip levels for prefiltered map
     
     // Material textures (map from material index to texture image)
     std::vector<sg_image> material_textures;
@@ -1023,172 +1029,343 @@ void CreateSkyboxGeometry() {
     g_state.skybox_index_buffer = {0};
 }
 
-// Helper function to convert equirectangular UV to direction vector
-HMM_Vec3 EquirectUVToDir(float u, float v) {
-    float theta = u * 2.0f * 3.14159265359f;
-    float phi = v * 3.14159265359f;
-    float sinPhi = sinf(phi);
-    return HMM_Vec3{
-        cosf(theta) * sinPhi,
-        cosf(phi),
-        sinf(theta) * sinPhi
-    };
+// Helper function to get cubemap face direction from UV
+HMM_Vec3 GetCubemapDirection(int face, float u, float v) {
+    // u, v in range [-1, 1]
+    HMM_Vec3 dir;
+    switch (face) {
+        case 0: dir = HMM_Vec3{-1.0f, v, -u}; break;  // +X
+        case 1: dir = HMM_Vec3{ 1.0f, v,  u}; break;  // -X
+        case 2: dir = HMM_Vec3{-u,  1.0f, -v}; break;    // +Y
+        case 3: dir = HMM_Vec3{-u, -1.0f, v}; break;  // -Y
+        case 4: dir = HMM_Vec3{-u, v,  1.0f}; break;   // +Z
+        case 5: dir = HMM_Vec3{ u, v, -1.0f}; break; // -Z
+    }
+    return HMM_NormV3(dir);
 }
 
-// Load HDR image and convert to cubemap (CPU-side conversion)
+// Sample equirectangular map bilinearly
+HMM_Vec4 SampleEquirect(const std::vector<float>& rgba_data, int width, int height, HMM_Vec3 dir) {
+    float theta = atan2f(dir.Z, dir.X);
+    float phi = acosf(fmaxf(-1.0f, fminf(1.0f, dir.Y)));
+    
+    float u = (theta / (2.0f * 3.14159265359f)) + 0.5f;
+    float v = phi / 3.14159265359f;
+    
+    // Bilinear sampling
+    float fx = u * width - 0.5f;
+    float fy = v * height - 0.5f;
+    int x0 = (int)floorf(fx);
+    int y0 = (int)floorf(fy);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    float wx = fx - x0;
+    float wy = fy - y0;
+    
+    // Wrap/clamp
+    x0 = ((x0 % width) + width) % width;
+    x1 = ((x1 % width) + width) % width;
+    y0 = fmaxf(0, fminf(height - 1, y0));
+    y1 = fmaxf(0, fminf(height - 1, y1));
+    
+    auto sample = [&](int x, int y) -> HMM_Vec4 {
+        int idx = (y * width + x) * 4;
+        return HMM_Vec4{rgba_data[idx], rgba_data[idx+1], rgba_data[idx+2], rgba_data[idx+3]};
+    };
+    
+    HMM_Vec4 s00 = sample(x0, y0);
+    HMM_Vec4 s10 = sample(x1, y0);
+    HMM_Vec4 s01 = sample(x0, y1);
+    HMM_Vec4 s11 = sample(x1, y1);
+    
+    HMM_Vec4 result;
+    for (int i = 0; i < 4; i++) {
+        float v0 = s00.Elements[i] * (1-wx) + s10.Elements[i] * wx;
+        float v1 = s01.Elements[i] * (1-wx) + s11.Elements[i] * wx;
+        result.Elements[i] = v0 * (1-wy) + v1 * wy;
+    }
+    return result;
+}
+
+// Hammersley sequence for importance sampling
+float RadicalInverse_VdC(uint32_t bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10f;
+}
+
+HMM_Vec2 Hammersley(uint32_t i, uint32_t N) {
+    return HMM_Vec2{float(i) / float(N), RadicalInverse_VdC(i)};
+}
+
+// GGX importance sampling
+HMM_Vec3 ImportanceSampleGGX(HMM_Vec2 Xi, HMM_Vec3 N, float roughness) {
+    float a = roughness * roughness;
+    float phi = 2.0f * 3.14159265359f * Xi.X;
+    float cosTheta = sqrtf((1.0f - Xi.Y) / (1.0f + (a*a - 1.0f) * Xi.Y));
+    float sinTheta = sqrtf(1.0f - cosTheta * cosTheta);
+    
+    // Spherical to cartesian (tangent space)
+    HMM_Vec3 H = {cosf(phi) * sinTheta, sinf(phi) * sinTheta, cosTheta};
+    
+    // Tangent space to world space
+    HMM_Vec3 up = fabsf(N.Y) < 0.999f ? HMM_Vec3{0, 1, 0} : HMM_Vec3{1, 0, 0};
+    HMM_Vec3 tangent = HMM_NormV3(HMM_Cross(up, N));
+    HMM_Vec3 bitangent = HMM_Cross(N, tangent);
+    
+    HMM_Vec3 sampleVec = {
+        tangent.X * H.X + bitangent.X * H.Y + N.X * H.Z,
+        tangent.Y * H.X + bitangent.Y * H.Y + N.Y * H.Z,
+        tangent.Z * H.X + bitangent.Z * H.Y + N.Z * H.Z
+    };
+    return HMM_NormV3(sampleVec);
+}
+
+// Load HDR image and create:
+// 1. environment_cubemap - high-res cubemap for skybox (512x512)
+// 2. prefiltered_cubemap - prefiltered env map for PBR specular (256x256 with mips)
+// 3. irradiance_cubemap - diffuse IBL map (32x32)
 bool LoadHDRAndCreateCubemap(const std::string& hdr_path) {
     int width, height, nrComponents;
-    // With STBI_WINDOWS_UTF8, stbi_loadf can handle UTF-8 paths directly on Windows
     float* hdr_data = stbi_loadf(hdr_path.c_str(), &width, &height, &nrComponents, 0);
     if (!hdr_data) {
-        const char* error = stbi_failure_reason();
         std::cerr << "Failed to load HDR image: " << hdr_path << std::endl;
-        if (error) {
-            std::cerr << "  Error: " << error << std::endl;
-        }
         return false;
     }
     
-    // Validate loaded image data
-    if (width <= 0 || height <= 0) {
-        std::cerr << "Invalid HDR image dimensions: " << width << "x" << height << std::endl;
+    if (width <= 0 || height <= 0 || nrComponents < 3) {
+        std::cerr << "Invalid HDR image" << std::endl;
         stbi_image_free(hdr_data);
         return false;
     }
     
-    if (nrComponents < 3) {
-        std::cerr << "HDR image must have at least 3 components (RGB), got: " << nrComponents << std::endl;
-        stbi_image_free(hdr_data);
-        return false;
-    }
-    
-    std::cout << "Loaded HDR image: " << width << "x" << height << " (" << nrComponents << " components)" << std::endl;
+    std::cout << "Loaded HDR image: " << width << "x" << height << std::endl;
 
-    // Convert to RGBA if needed
-    std::vector<float> rgba_data;
-    if (nrComponents == 3) {
-        rgba_data.resize(width * height * 4);
-        for (int i = 0; i < width * height; ++i) {
-            rgba_data[i * 4 + 0] = hdr_data[i * 3 + 0];
-            rgba_data[i * 4 + 1] = hdr_data[i * 3 + 1];
-            rgba_data[i * 4 + 2] = hdr_data[i * 3 + 2];
-            rgba_data[i * 4 + 3] = 1.0f;
-        }
-    } else {
-        rgba_data.assign(hdr_data, hdr_data + width * height * 4);
+    // Convert to RGBA
+    std::vector<float> rgba_data(width * height * 4);
+    for (int i = 0; i < width * height; ++i) {
+        rgba_data[i * 4 + 0] = hdr_data[i * nrComponents + 0];
+        rgba_data[i * 4 + 1] = hdr_data[i * nrComponents + 1];
+        rgba_data[i * 4 + 2] = hdr_data[i * nrComponents + 2];
+        rgba_data[i * 4 + 3] = 1.0f;
     }
+    stbi_image_free(hdr_data);
     
-    // Convert equirectangular to cubemap on CPU
-    const int cubemap_size = 512;
-    std::vector<std::vector<float>> cubemap_faces(6);
+    // ========== 1. Generate high-res environment cubemap for skybox ==========
+    std::cout << "Generating skybox cubemap (512x512)..." << std::endl;
     
-    // Standard OpenGL cubemap face layout:
-    // Face 0: +X (right)   - looking in +X direction
-    // Face 1: -X (left)    - looking in -X direction
-    // Face 2: +Y (top)     - looking in +Y direction
-    // Face 3: -Y (bottom)  - looking in -Y direction
-    // Face 4: +Z (front)    - looking in +Z direction
-    // Face 5: -Z (back)    - looking in -Z direction
+    const int skybox_size = 512;
+    std::vector<float> skybox_data(skybox_size * skybox_size * 4 * 6);
     
     for (int face = 0; face < 6; ++face) {
-        cubemap_faces[face].resize(cubemap_size * cubemap_size * 4);
-        
-        for (int y = 0; y < cubemap_size; ++y) {
-            for (int x = 0; x < cubemap_size; ++x) {
-                // Convert cubemap UV to direction vector
-                // UV range: [0, 1] -> [-1, 1]
-                float u = (x + 0.5f) / cubemap_size * 2.0f - 1.0f;
-                float v = (y + 0.5f) / cubemap_size * 2.0f - 1.0f;
-
-                HMM_Vec3 dir;
-                // Map UV to direction based on cubemap face
-                // sokol cubemap layout (standard OpenGL-style)
-                switch (face) {
-                    case 0: // +X (right) - positive X axis
-                        dir = HMM_Vec3{-1.0f, v, -u};
-                        break;
-                    case 1: // -X (left) - negative X axis
-                        dir = HMM_Vec3{1.0f, v, u};
-                        break;
-                    case 2: // +Y (top) - positive Y axis
-                        dir = HMM_Vec3{-u, 1.0f, -v};
-                        break;
-                    case 3: // -Y (bottom) - negative Y axis
-                        dir = HMM_Vec3{-u, -1.0f, v};
-                        break;
-                    case 4: // +Z (front) - positive Z axis
-                        dir = HMM_Vec3{-u, v, 1.0f};
-                        break;
-                    case 5: // -Z (back) - negative Z axis
-                        dir = HMM_Vec3{u, v, -1.0f};
-                        break;
-                }
-                dir = HMM_NormV3(dir);
+        for (int y = 0; y < skybox_size; ++y) {
+            for (int x = 0; x < skybox_size; ++x) {
+                float u = (x + 0.5f) / skybox_size * 2.0f - 1.0f;
+                float v = (y + 0.5f) / skybox_size * 2.0f - 1.0f;
+                HMM_Vec3 dir = GetCubemapDirection(face, u, v);
                 
-                // Convert direction to equirectangular UV
-                // Equirectangular mapping: theta (azimuth) and phi (elevation)
-                float theta = atan2f(dir.Z, dir.X);  // azimuth: [-PI, PI]
-                float phi = acosf(dir.Y);             // elevation: [0, PI]
+                HMM_Vec4 sample = SampleEquirect(rgba_data, width, height, dir);
                 
-                // Normalize to [0, 1]
-                float equirect_u = (theta / (2.0f * 3.14159265359f)) + 0.5f;
-                float equirect_v = phi / 3.14159265359f;
-                
-                // Clamp to valid range
-                if (equirect_u < 0.0f) equirect_u = 0.0f;
-                if (equirect_u > 1.0f) equirect_u = 1.0f;
-                if (equirect_v < 0.0f) equirect_v = 0.0f;
-                if (equirect_v > 1.0f) equirect_v = 1.0f;
-                
-                // Sample from equirectangular map
-                int src_x = (int)(equirect_u * width);
-                int src_y = (int)(equirect_v * height);
-                if (src_x >= width) src_x = width - 1;
-                if (src_y >= height) src_y = height - 1;
-                int src_idx = (src_y * width + src_x) * 4;
-                
-                // Flip Y coordinate when writing to cubemap to match sokol's image coordinate system
-                // sokol uses top-left origin, so we need to flip Y
-                int dst_y = cubemap_size - 1 - y;
-                int dst_idx = (dst_y * cubemap_size + x) * 4;
-                cubemap_faces[face][dst_idx + 0] = rgba_data[src_idx + 0];
-                cubemap_faces[face][dst_idx + 1] = rgba_data[src_idx + 1];
-                cubemap_faces[face][dst_idx + 2] = rgba_data[src_idx + 2];
-                cubemap_faces[face][dst_idx + 3] = rgba_data[src_idx + 3];
+                int dst_y = skybox_size - 1 - y;
+                int idx = (face * skybox_size * skybox_size + dst_y * skybox_size + x) * 4;
+                skybox_data[idx + 0] = sample.X;
+                skybox_data[idx + 1] = sample.Y;
+                skybox_data[idx + 2] = sample.Z;
+                skybox_data[idx + 3] = 1.0f;
             }
         }
     }
     
-    // Create cubemap texture
-    // For cubemap, all 6 faces are packed into a single mip level
-    // The data should be: face0, face1, face2, face3, face4, face5
-    std::vector<float> cubemap_packed;
-    cubemap_packed.reserve(cubemap_size * cubemap_size * 4 * 6);
-    for (int i = 0; i < 6; ++i) {
-        cubemap_packed.insert(cubemap_packed.end(), cubemap_faces[i].begin(), cubemap_faces[i].end());
+    sg_image_desc skybox_desc = {};
+    skybox_desc.type = SG_IMAGETYPE_CUBE;
+    skybox_desc.width = skybox_size;
+    skybox_desc.height = skybox_size;
+    skybox_desc.num_slices = 6;
+    skybox_desc.num_mipmaps = 1;
+    skybox_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    skybox_desc.usage.immutable = true;
+    skybox_desc.label = "skybox-cubemap";
+    skybox_desc.data.mip_levels[0].ptr = skybox_data.data();
+    skybox_desc.data.mip_levels[0].size = skybox_size * skybox_size * 4 * sizeof(float) * 6;
+    g_state.environment_cubemap = sg_make_image(&skybox_desc);
+    
+    sg_view_desc skybox_view_desc = {};
+    skybox_view_desc.texture.image = g_state.environment_cubemap;
+    g_state.environment_cubemap_view = sg_make_view(&skybox_view_desc);
+    
+    std::cout << "  Skybox cubemap done" << std::endl;
+    
+    // ========== 2. Generate prefiltered environment map for PBR ==========
+    const int prefilter_size = 256;
+    const int num_mips = g_state.prefilter_mip_levels;
+    
+    std::cout << "Generating prefiltered environment map (" << num_mips << " mip levels)..." << std::endl;
+    
+    std::vector<std::vector<float>> mip_data(num_mips);
+    
+    for (int mip = 0; mip < num_mips; ++mip) {
+        int mip_size = prefilter_size >> mip;
+        if (mip_size < 1) mip_size = 1;
+        
+        float roughness = (float)mip / (float)(num_mips - 1);
+        int num_samples = (mip == 0) ? 1 : (32 + mip * 32);
+        
+        mip_data[mip].resize(mip_size * mip_size * 4 * 6);
+        
+        for (int face = 0; face < 6; ++face) {
+            for (int y = 0; y < mip_size; ++y) {
+                for (int x = 0; x < mip_size; ++x) {
+                    float u = (x + 0.5f) / mip_size * 2.0f - 1.0f;
+                    float v = (y + 0.5f) / mip_size * 2.0f - 1.0f;
+                    HMM_Vec3 N = GetCubemapDirection(face, u, v);
+                    
+                    HMM_Vec3 color = {0, 0, 0};
+                    float totalWeight = 0.0f;
+                    
+                    if (mip == 0) {
+                        HMM_Vec4 sample = SampleEquirect(rgba_data, width, height, N);
+                        color = {sample.X, sample.Y, sample.Z};
+                        totalWeight = 1.0f;
+                    } else {
+                        HMM_Vec3 V = N;
+                        for (int i = 0; i < num_samples; ++i) {
+                            HMM_Vec2 Xi = Hammersley(i, num_samples);
+                            HMM_Vec3 H = ImportanceSampleGGX(Xi, N, roughness);
+                            float VdotH = fmaxf(HMM_DotV3(V, H), 0.0f);
+                            HMM_Vec3 L = HMM_NormV3(HMM_SubV3(HMM_MulV3F(H, 2.0f * VdotH), V));
+                            
+                            float NdotL = fmaxf(HMM_DotV3(N, L), 0.0f);
+                            if (NdotL > 0.0f) {
+                                HMM_Vec4 sample = SampleEquirect(rgba_data, width, height, L);
+                                color.X += sample.X * NdotL;
+                                color.Y += sample.Y * NdotL;
+                                color.Z += sample.Z * NdotL;
+                                totalWeight += NdotL;
+                            }
+                        }
+                    }
+                    
+                    if (totalWeight > 0.0f) {
+                        color = HMM_DivV3F(color, totalWeight);
+                    }
+                    
+                    int dst_y = mip_size - 1 - y;
+                    int idx = (face * mip_size * mip_size + dst_y * mip_size + x) * 4;
+                    mip_data[mip][idx + 0] = color.X;
+                    mip_data[mip][idx + 1] = color.Y;
+                    mip_data[mip][idx + 2] = color.Z;
+                    mip_data[mip][idx + 3] = 1.0f;
+                }
+            }
+        }
+        std::cout << "  Mip " << mip << " (" << mip_size << "x" << mip_size << ", roughness=" << roughness << ") done" << std::endl;
     }
     
-    sg_image_desc cubemap_desc = {};
-    cubemap_desc.type = SG_IMAGETYPE_CUBE;
-    cubemap_desc.width = cubemap_size;
-    cubemap_desc.height = cubemap_size;
-    cubemap_desc.num_slices = 6;
-    cubemap_desc.num_mipmaps = 1;
-    cubemap_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
-    cubemap_desc.usage.immutable = true;
-    cubemap_desc.label = "environment-cubemap";
-    cubemap_desc.data.mip_levels[0].ptr = cubemap_packed.data();
-    cubemap_desc.data.mip_levels[0].size = cubemap_size * cubemap_size * 4 * sizeof(float) * 6;
-    g_state.environment_cubemap = sg_make_image(&cubemap_desc);
+    sg_image_desc prefilter_desc = {};
+    prefilter_desc.type = SG_IMAGETYPE_CUBE;
+    prefilter_desc.width = prefilter_size;
+    prefilter_desc.height = prefilter_size;
+    prefilter_desc.num_slices = 6;
+    prefilter_desc.num_mipmaps = num_mips;
+    prefilter_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    prefilter_desc.usage.immutable = true;
+    prefilter_desc.label = "prefiltered-env-cubemap";
     
-    // Create persistent view for environment cubemap
-    sg_view_desc env_cubemap_view_desc = {};
-    env_cubemap_view_desc.texture.image = g_state.environment_cubemap;
-    g_state.environment_cubemap_view = sg_make_view(&env_cubemap_view_desc);
+    for (int mip = 0; mip < num_mips; ++mip) {
+        int mip_size = prefilter_size >> mip;
+        if (mip_size < 1) mip_size = 1;
+        prefilter_desc.data.mip_levels[mip].ptr = mip_data[mip].data();
+        prefilter_desc.data.mip_levels[mip].size = mip_size * mip_size * 4 * sizeof(float) * 6;
+    }
+    g_state.prefiltered_cubemap = sg_make_image(&prefilter_desc);
     
-    stbi_image_free(hdr_data);
+    sg_view_desc prefilter_view_desc = {};
+    prefilter_view_desc.texture.image = g_state.prefiltered_cubemap;
+    g_state.prefiltered_cubemap_view = sg_make_view(&prefilter_view_desc);
     
-    std::cout << "Created environment cubemap from HDR" << std::endl;
+    // ========== 3. Generate irradiance map for diffuse IBL ==========
+    std::cout << "Generating irradiance map..." << std::endl;
+    
+    const int irr_size = 32;
+    std::vector<float> irr_data(irr_size * irr_size * 4 * 6);
+    
+    for (int face = 0; face < 6; ++face) {
+        for (int y = 0; y < irr_size; ++y) {
+            for (int x = 0; x < irr_size; ++x) {
+                float u = (x + 0.5f) / irr_size * 2.0f - 1.0f;
+                float v = (y + 0.5f) / irr_size * 2.0f - 1.0f;
+                HMM_Vec3 N = GetCubemapDirection(face, u, v);
+                
+                HMM_Vec3 irradiance = {0, 0, 0};
+                HMM_Vec3 up = fabsf(N.Y) < 0.999f ? HMM_Vec3{0, 1, 0} : HMM_Vec3{1, 0, 0};
+                HMM_Vec3 right = HMM_NormV3(HMM_Cross(up, N));
+                up = HMM_Cross(N, right);
+                
+                float sampleDelta = 0.15f;
+                int nrSamples = 0;
+                for (float phi = 0.0f; phi < 2.0f * 3.14159f; phi += sampleDelta) {
+                    for (float theta = 0.0f; theta < 0.5f * 3.14159f; theta += sampleDelta) {
+                        float sinTheta = sinf(theta);
+                        float cosTheta = cosf(theta);
+                        HMM_Vec3 tangentSample = {sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta};
+                        
+                        HMM_Vec3 sampleDir = {
+                            tangentSample.X * right.X + tangentSample.Y * up.X + tangentSample.Z * N.X,
+                            tangentSample.X * right.Y + tangentSample.Y * up.Y + tangentSample.Z * N.Y,
+                            tangentSample.X * right.Z + tangentSample.Y * up.Z + tangentSample.Z * N.Z
+                        };
+                        
+                        HMM_Vec4 sample = SampleEquirect(rgba_data, width, height, sampleDir);
+                        irradiance.X += sample.X * cosTheta * sinTheta;
+                        irradiance.Y += sample.Y * cosTheta * sinTheta;
+                        irradiance.Z += sample.Z * cosTheta * sinTheta;
+                        nrSamples++;
+                    }
+                }
+                irradiance = HMM_MulV3F(irradiance, 3.14159f / (float)nrSamples);
+                
+                int dst_y = irr_size - 1 - y;
+                int idx = (face * irr_size * irr_size + dst_y * irr_size + x) * 4;
+                irr_data[idx + 0] = irradiance.X;
+                irr_data[idx + 1] = irradiance.Y;
+                irr_data[idx + 2] = irradiance.Z;
+                irr_data[idx + 3] = 1.0f;
+            }
+        }
+    }
+    
+    sg_image_desc irr_desc = {};
+    irr_desc.type = SG_IMAGETYPE_CUBE;
+    irr_desc.width = irr_size;
+    irr_desc.height = irr_size;
+    irr_desc.num_slices = 6;
+    irr_desc.num_mipmaps = 1;
+    irr_desc.pixel_format = SG_PIXELFORMAT_RGBA32F;
+    irr_desc.usage.immutable = true;
+    irr_desc.label = "irradiance-cubemap";
+    irr_desc.data.mip_levels[0].ptr = irr_data.data();
+    irr_desc.data.mip_levels[0].size = irr_size * irr_size * 4 * sizeof(float) * 6;
+    g_state.irradiance_cubemap = sg_make_image(&irr_desc);
+    
+    sg_view_desc irr_view_desc = {};
+    irr_view_desc.texture.image = g_state.irradiance_cubemap;
+    g_state.irradiance_cubemap_view = sg_make_view(&irr_view_desc);
+    
+    // Create sampler with mip filtering for prefiltered map
+    sg_sampler_desc smp_desc = {};
+    smp_desc.min_filter = SG_FILTER_LINEAR;
+    smp_desc.mag_filter = SG_FILTER_LINEAR;
+    smp_desc.mipmap_filter = SG_FILTER_LINEAR;
+    smp_desc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
+    smp_desc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
+    smp_desc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
+    smp_desc.label = "cubemap-sampler";
+    g_state.cubemap_sampler = sg_make_sampler(&smp_desc);
+    
+    std::cout << "Created skybox cubemap, prefiltered env map, and irradiance map" << std::endl;
     return true;
 }
 
@@ -1747,6 +1924,49 @@ void frame(void) {
                 g_state.ambient_intensity = 0.22f;
                 g_state.env_reflection_intensity = 0.75f;
             }
+            
+            // Second row of presets
+            if (ImGui::Button("Nendoroid")) {
+                // Nendoroid / Clay figure style - matte, soft, cute look
+                g_state.roughness = 0.62f;          // High roughness = matte surface
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.05f;          // Almost no clear coat
+                g_state.clearcoat_roughness = 0.4f;
+                g_state.subsurface = 0.65f;         // Strong SSS for soft/clay feel
+                g_state.subsurface_color = {1.0f, 0.6f, 0.5f}; // Warm, soft color
+                g_state.rim_power = 1.5f;           // Very soft rim
+                g_state.rim_intensity = 0.2f;       // Subtle rim
+                g_state.ambient_intensity = 0.45f;  // Higher ambient = softer shadows
+                g_state.env_reflection_intensity = 0.08f; // Minimal reflection
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Figma")) {
+                // Figma style - slightly more detailed than Nendoroid
+                g_state.roughness = 0.45f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.25f;
+                g_state.clearcoat_roughness = 0.25f;
+                g_state.subsurface = 0.5f;
+                g_state.subsurface_color = {1.0f, 0.5f, 0.35f};
+                g_state.rim_power = 2.0f;
+                g_state.rim_intensity = 0.35f;
+                g_state.ambient_intensity = 0.35f;
+                g_state.env_reflection_intensity = 0.25f;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Scale Figure")) {
+                // High-end scale figure (1/7, 1/8 etc) - glossy, detailed
+                g_state.roughness = 0.28f;
+                g_state.metallic = 0.0f;
+                g_state.clearcoat = 0.65f;
+                g_state.clearcoat_roughness = 0.1f;
+                g_state.subsurface = 0.45f;
+                g_state.subsurface_color = {1.0f, 0.5f, 0.3f};
+                g_state.rim_power = 2.2f;
+                g_state.rim_intensity = 0.45f;
+                g_state.ambient_intensity = 0.28f;
+                g_state.env_reflection_intensity = 0.45f;
+            }
         }
         ImGui::End();
     }
@@ -2226,7 +2446,7 @@ void frame(void) {
         // FS params: PBR figure material parameters
         mmd_fs_params_t fs_params;
         fs_params.view_pos = g_state.camera_pos;
-        fs_params._pad0 = 0.0f;
+        fs_params.max_reflection_lod = (float)(g_state.prefilter_mip_levels - 1);
         
         // Light parameters
         fs_params.light_direction = g_state.light_direction;
@@ -2273,15 +2493,21 @@ void frame(void) {
             bind.views[0] = material_view;
             bind.samplers[0] = g_state.default_sampler;
             
-            // Bind environment cubemap for reflections (slot 1)
-            if (g_state.environment_cubemap_view.id != 0) {
-                bind.views[1] = g_state.environment_cubemap_view;
-                bind.samplers[1] = g_state.default_sampler;
+            // Bind prefiltered environment cubemap (slot 1) - with mip filtering for PBR specular
+            if (g_state.prefiltered_cubemap_view.id != 0) {
+                bind.views[1] = g_state.prefiltered_cubemap_view;
+                bind.samplers[1] = g_state.cubemap_sampler.id != 0 ? g_state.cubemap_sampler : g_state.default_sampler;
+            }
+            
+            // Bind irradiance map (slot 2) - for diffuse IBL
+            if (g_state.irradiance_cubemap_view.id != 0) {
+                bind.views[2] = g_state.irradiance_cubemap_view;
+                bind.samplers[2] = g_state.default_sampler;
             }
             
             sg_apply_bindings(&bind);
             sg_apply_uniforms(0, SG_RANGE(vs_params));
-            sg_apply_uniforms(2, SG_RANGE(fs_params)); // fs_params is now binding 2
+            sg_apply_uniforms(3, SG_RANGE(fs_params)); // fs_params is now binding 3
 
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);

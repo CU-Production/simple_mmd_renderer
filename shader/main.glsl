@@ -34,15 +34,21 @@ in vec3 norm;
 in vec3 world_pos;
 out vec4 frag_color;
 
+// Diffuse texture
 layout(binding=0) uniform texture2D diffuse_texture;
 layout(binding=0) uniform sampler diffuse_smp;
 
+// Prefiltered environment map (with mip levels for roughness)
 layout(binding=1) uniform textureCube environment_map;
 layout(binding=1) uniform sampler environment_smp;
 
-layout(binding=2) uniform fs_params {
+// Irradiance map (for diffuse IBL)
+layout(binding=2) uniform textureCube irradiance_map;
+layout(binding=2) uniform sampler irradiance_smp;
+
+layout(binding=3) uniform fs_params {
     vec3 view_pos;
-    float _pad0;
+    float max_reflection_lod;  // Number of mip levels - 1
     
     vec3 light_direction;
     float light_intensity;
@@ -101,7 +107,7 @@ float V_SmithGGX(float NdotV, float NdotL, float roughness) {
 }
 
 // ============================================
-// Fresnel - Schlick with roughness
+// Fresnel
 // ============================================
 vec3 F_Schlick(float VdotH, vec3 F0) {
     return F0 + (1.0 - F0) * pow(1.0 - VdotH, 5.0);
@@ -112,25 +118,22 @@ vec3 F_SchlickRoughness(float NdotV, vec3 F0, float roughness) {
 }
 
 // ============================================
-// Plastic/Figure BRDF
-// Key: dual-lobe specular + colored subsurface
+// Plastic BRDF (dual-lobe specular)
 // ============================================
 vec3 PlasticBRDF(
     vec3 N, vec3 V, vec3 L, vec3 H,
     float NdotV, float NdotL, float NdotH, float VdotH,
     vec3 albedo, float rough, float cc, float ccRough
 ) {
-    // === Layer 1: Base plastic specular ===
-    // Plastic F0 is around 0.04-0.05, but we tint it slightly with albedo
+    // Base plastic specular (slightly tinted)
     vec3 F0_base = mix(vec3(0.04), albedo * 0.15 + 0.04, 0.3);
     
     float D1 = D_GGX(NdotH, rough);
     float V1 = V_SmithGGX(NdotV, NdotL, rough);
     vec3 F1 = F_Schlick(VdotH, F0_base);
-    
     vec3 spec_base = D1 * V1 * F1;
     
-    // === Layer 2: Clear coat (sharper, on top) ===
+    // Clear coat layer
     vec3 spec_coat = vec3(0.0);
     if (cc > 0.001) {
         float D2 = D_GGX(NdotH, ccRough);
@@ -139,16 +142,11 @@ vec3 PlasticBRDF(
         spec_coat = vec3(D2 * V2 * F2 * cc);
     }
     
-    // Combine: base spec + clear coat
-    // Clear coat attenuates base layer slightly
-    vec3 specular = spec_base * (1.0 - cc * 0.5) + spec_coat;
-    
-    return specular;
+    return spec_base * (1.0 - cc * 0.5) + spec_coat;
 }
 
 // ============================================
-// Subsurface Scattering for Plastic
-// Simulates light penetrating and scattering inside
+// Subsurface Scattering
 // ============================================
 vec3 PlasticSSS(
     vec3 N, vec3 L, vec3 V,
@@ -157,49 +155,34 @@ vec3 PlasticSSS(
 ) {
     if (sssIntensity < 0.001) return vec3(0.0);
     
-    // Wrap diffuse - key for plastic's soft shadow transition
     float wrap = 0.5;
     float wrapDiffuse = (NdotL + wrap) / (1.0 + wrap);
     wrapDiffuse = max(0.0, wrapDiffuse);
-    wrapDiffuse = wrapDiffuse * wrapDiffuse; // Soften
+    wrapDiffuse = wrapDiffuse * wrapDiffuse;
     
-    // Transmittance (back-lighting through thin parts)
     float backLight = pow(max(0.0, dot(V, -L)), 3.0) * 0.4;
-    
-    // View-dependent scattering (more visible at grazing angles)
     float viewScatter = (1.0 - NdotV) * 0.3;
     
-    // Combine SSS components
     float sssFactor = (wrapDiffuse * 0.7 + backLight + viewScatter) * sssIntensity;
-    vec3 sss = albedo * sssColor * sssFactor;
-    
-    return sss;
+    return albedo * sssColor * sssFactor;
 }
 
 // ============================================
-// Edge Darkening (plastic depth absorption)
-// Light travels further at edges, absorbing more
+// Edge Darkening
 // ============================================
 vec3 EdgeDarkening(vec3 albedo, float NdotV, float intensity) {
-    // At grazing angles, light travels through more material
     float edgeFactor = 1.0 - NdotV;
-    edgeFactor = edgeFactor * edgeFactor; // Square for smooth falloff
-    
-    // Darken and saturate at edges
-    vec3 darkened = albedo * albedo; // Darken by squaring
-    vec3 result = mix(albedo, darkened, edgeFactor * intensity);
-    
-    return result;
+    edgeFactor = edgeFactor * edgeFactor;
+    vec3 darkened = albedo * albedo;
+    return mix(albedo, darkened, edgeFactor * intensity);
 }
 
 // ============================================
-// Soft Tone Mapping (preserves plastic look)
+// Tone Mapping
 // ============================================
 vec3 ToneMap(vec3 color) {
-    // Reinhard with white point
-    float whitePoint = 2.0;
-    vec3 mapped = color * (1.0 + color / (whitePoint * whitePoint)) / (1.0 + color);
-    return mapped;
+    float whitePoint = 2.5;
+    return color * (1.0 + color / (whitePoint * whitePoint)) / (1.0 + color);
 }
 
 void main() {
@@ -214,105 +197,93 @@ void main() {
     vec3 albedo = GammaToLinear(albedoSample.rgb);
     float alpha = albedoSample.a;
     
-    // Dot products (clamped)
+    // Dot products
     float NdotV = max(dot(N, V), 0.001);
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.001);
     
-    // === Apply edge darkening to albedo (plastic depth effect) ===
+    // Edge darkening for plastic depth effect
     vec3 plasticAlbedo = EdgeDarkening(albedo, NdotV, 0.4);
     
-    // === Diffuse with energy conservation ===
-    // Plastic diffuse: use modified albedo, account for specular energy loss
+    // Energy conservation
     vec3 F0 = vec3(0.04);
     vec3 F = F_Schlick(VdotH, F0);
     vec3 kD = (1.0 - F) * (1.0 - metallic);
-    
-    // Diffuse term (NOT divided by PI for brighter result)
     vec3 diffuse = kD * plasticAlbedo;
     
-    // === Specular (dual-lobe plastic BRDF) ===
-    vec3 specular = PlasticBRDF(
-        N, V, L, H,
-        NdotV, NdotL, NdotH, VdotH,
-        albedo, roughness, clearcoat, clearcoat_roughness
-    );
+    // Specular
+    vec3 specular = PlasticBRDF(N, V, L, H, NdotV, NdotL, NdotH, VdotH,
+                                 albedo, roughness, clearcoat, clearcoat_roughness);
     
-    // === Direct lighting ===
+    // Direct lighting
     vec3 radiance = light_color * light_intensity;
-    
-    // Soft shadow transition using modified Lambert
-    float shadow = NdotL;
-    // Add slight wrap for softer transition
-    shadow = shadow * 0.8 + 0.2 * max(0.0, (NdotL + 0.3) / 1.3);
-    
+    float shadow = NdotL * 0.8 + 0.2 * max(0.0, (NdotL + 0.3) / 1.3);
     vec3 directLight = (diffuse * shadow + specular * NdotL) * radiance;
     
-    // === Subsurface Scattering ===
+    // SSS
     vec3 sss = PlasticSSS(N, L, V, NdotL, NdotV, plasticAlbedo, subsurface_color, subsurface);
     sss *= radiance;
     
-    // === Rim Light (figure photography style) ===
+    // Rim light
     float rim = pow(1.0 - NdotV, rim_power);
-    // Modulate by light facing for natural look
     float rimLightFacing = max(0.2, NdotL * 0.5 + 0.5);
     vec3 rimLight = rim_color * rim * rim_intensity * rimLightFacing;
-    // Tint rim with albedo slightly for plastic look
     rimLight *= mix(vec3(1.0), albedo, 0.3);
     
-    // === Environment Reflection ===
-    vec3 envColor = texture(samplerCube(environment_map, environment_smp), R).rgb;
+    // ========== IBL (Image-Based Lighting) ==========
     
-    // Fresnel for environment (stronger at edges = plastic shine)
-    vec3 F_env = F_SchlickRoughness(NdotV, F0, roughness);
-    // Plastic reflects more at edges
-    float envFresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 4.0);
-    envFresnel *= (1.0 - roughness * 0.5); // Less reflection when rough
+    // Diffuse IBL from irradiance map
+    vec3 irradiance = texture(samplerCube(irradiance_map, irradiance_smp), N).rgb;
+    vec3 diffuseIBL = irradiance * plasticAlbedo * kD * ambient_intensity;
     
-    vec3 envReflection = envColor * envFresnel * env_reflection_intensity;
+    // Specular IBL from prefiltered environment map
+    // Select mip level based on roughness
+    float lod = roughness * max_reflection_lod;
+    vec3 prefilteredColor = textureLod(samplerCube(environment_map, environment_smp), R, lod).rgb;
     
-    // Clear coat env reflection (sharper, more visible)
-    vec3 ccEnvReflection = vec3(0.0);
+    // Fresnel for IBL
+    vec3 F_ibl = F_SchlickRoughness(NdotV, F0, roughness);
+    
+    // Approximate environment BRDF (without LUT, simplified)
+    // This is a rough approximation of the split-sum integral's second part
+    float envBRDF_x = 1.0 - roughness; // Approximate scale
+    float envBRDF_y = roughness * 0.5; // Approximate bias
+    vec3 specularIBL = prefilteredColor * (F_ibl * envBRDF_x + envBRDF_y) * env_reflection_intensity;
+    
+    // Clear coat IBL (sharper reflection)
+    vec3 ccIBL = vec3(0.0);
     if (clearcoat > 0.001) {
+        float ccLod = clearcoat_roughness * max_reflection_lod;
+        vec3 ccPrefilteredColor = textureLod(samplerCube(environment_map, environment_smp), R, ccLod).rgb;
         float ccFresnel = 0.04 + 0.96 * pow(1.0 - NdotV, 5.0);
-        ccEnvReflection = envColor * ccFresnel * clearcoat * env_reflection_intensity * 0.5;
+        ccIBL = ccPrefilteredColor * ccFresnel * clearcoat * env_reflection_intensity * 0.5;
     }
     
-    // === Ambient (hemisphere lighting) ===
-    float hemi = N.y * 0.5 + 0.5;
-    vec3 skyAmbient = vec3(0.7, 0.8, 1.0);   // Cool sky
-    vec3 groundAmbient = vec3(0.4, 0.35, 0.3); // Warm ground
-    vec3 ambientColor = mix(groundAmbient, skyAmbient, hemi);
-    vec3 ambient = plasticAlbedo * ambientColor * ambient_intensity;
-    
-    // === Final Composition ===
+    // ========== Final Composition ==========
     vec3 finalColor = vec3(0.0);
     
-    // Base lighting
+    // Direct lighting
     finalColor += directLight;
     finalColor += sss;
-    finalColor += ambient;
     
-    // Rim light (on top, characteristic of figure photos)
+    // IBL (ambient)
+    finalColor += diffuseIBL;
+    finalColor += specularIBL * (1.0 - clearcoat * 0.3);
+    finalColor += ccIBL;
+    
+    // Rim light
     finalColor += rimLight;
     
-    // Environment reflections
-    finalColor += envReflection * (1.0 - clearcoat * 0.3);
-    finalColor += ccEnvReflection;
-    
-    // === Post Processing ===
-    // Tone mapping
+    // Post processing
     finalColor = ToneMap(finalColor);
     
-    // Subtle saturation boost (figures are vibrant)
+    // Saturation boost
     float luma = dot(finalColor, vec3(0.2126, 0.7152, 0.0722));
     finalColor = mix(vec3(luma), finalColor, 1.15);
     
-    // Gamma correction
+    // Gamma
     finalColor = LinearToGamma(finalColor);
-    
-    // Clamp
     finalColor = clamp(finalColor, 0.0, 1.0);
     
     frag_color = vec4(finalColor, alpha);
