@@ -208,6 +208,14 @@ struct {
     sg_image default_texture = {0}; // White 1x1 texture for materials without texture
     sg_view default_texture_view = {0}; // Persistent view for default texture
     
+    // Stocking effect resources (MME Stockingize style)
+    sg_image stocking_texture = {0};      // grey2.png - stocking pattern texture
+    sg_view stocking_texture_view = {0};
+    std::vector<bool> is_stocking_part;   // Mark which parts should have stocking effect
+    bool stocking_enabled = true;         // Global toggle for stocking effect
+    float stocking_density = 1.0f;        // Stocking density/opacity (0.0 - 1.0)
+    float stocking_sigma = 1.4f;          // Gaussian sigma for edge detection
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -618,18 +626,52 @@ void LoadMaterialTextures(const std::string& model_filename) {
     size_t part_num = g_state.model->GetPartNum();
     g_state.material_textures.resize(part_num, g_state.default_texture);
     g_state.material_texture_views.resize(part_num, g_state.default_texture_view);
+    g_state.is_stocking_part.clear();
+    g_state.is_stocking_part.resize(part_num, false);
+    
+    // Helper lambda to check if string contains leg-related keywords (case-insensitive)
+    auto containsLegKeyword = [](const std::wstring& str) -> bool {
+        std::wstring lower = str;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+        // Check for various leg-related keywords
+        return lower.find(L"leg") != std::wstring::npos ||
+               lower.find(L"足") != std::wstring::npos ||    // Japanese: foot/leg
+               lower.find(L"脚") != std::wstring::npos ||    // Japanese: leg
+               lower.find(L"腿") != std::wstring::npos ||    // Chinese: leg
+               lower.find(L"thigh") != std::wstring::npos ||
+               lower.find(L"calf") != std::wstring::npos ||
+               lower.find(L"shin") != std::wstring::npos;
+    };
     
     for (size_t i = 0; i < part_num; ++i) {
         const mmd::Model::Part& part = g_state.model->GetPart(i);
         const mmd::Material& material = part.GetMaterial();
         
+        // Check if this part should have stocking effect
+        std::wstring material_name = material.GetName();
+        bool is_leg_part = containsLegKeyword(material_name);
+        
         const mmd::Texture* texture = material.GetTexture();
+        std::wstring texture_path;
         if (texture) {
-            std::wstring texture_path = texture->GetTexturePath();
-            // Only print first few textures to avoid spam
-            if (i < 3) {
-                std::cout << "Loading texture " << i << ": " << wstring_to_utf8(texture_path) << std::endl;
+            texture_path = texture->GetTexturePath();
+            // Also check texture path for leg keywords
+            if (!is_leg_part) {
+                is_leg_part = containsLegKeyword(texture_path);
             }
+            
+            // Only print first few textures to avoid spam
+            if (i < 5) {
+                std::cout << "Part " << i << ": " << wstring_to_utf8(material_name);
+                if (!texture_path.empty()) {
+                    std::cout << " (tex: " << wstring_to_utf8(texture_path) << ")";
+                }
+                if (is_leg_part) {
+                    std::cout << " [STOCKING]";
+                }
+                std::cout << std::endl;
+            }
+            
             sg_image loaded_tex = LoadTexture(texture_path, model_dir);
             g_state.material_textures[i] = loaded_tex;
             
@@ -641,9 +683,14 @@ void LoadMaterialTextures(const std::string& model_filename) {
             g_state.material_textures[i] = g_state.default_texture;
             g_state.material_texture_views[i] = g_state.default_texture_view;
         }
+        
+        g_state.is_stocking_part[i] = is_leg_part;
     }
     
-    std::cout << "Loaded " << g_state.material_textures.size() << " material textures" << std::endl;
+    // Count how many parts are marked as stocking
+    size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
+    std::cout << "Loaded " << g_state.material_textures.size() << " material textures (" 
+              << stocking_count << " marked for stocking effect)" << std::endl;
 }
 
 // Load PMX model
@@ -1386,6 +1433,38 @@ void init(void) {
     default_view_desc.texture.image = g_state.default_texture;
     g_state.default_texture_view = sg_make_view(&default_view_desc);
     
+    // Load stocking texture (grey2.png)
+    {
+        int stk_width, stk_height, stk_channels;
+        unsigned char* stk_data = stbi_load("assets/grey2.png", &stk_width, &stk_height, &stk_channels, 4);
+        if (stk_data) {
+            sg_image_desc stk_desc = {};
+            stk_desc.type = SG_IMAGETYPE_2D;
+            stk_desc.width = stk_width;
+            stk_desc.height = stk_height;
+            stk_desc.num_slices = 1;
+            stk_desc.num_mipmaps = 1;
+            stk_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
+            stk_desc.usage.immutable = true;
+            stk_desc.label = "stocking-texture";
+            stk_desc.data.mip_levels[0].ptr = stk_data;
+            stk_desc.data.mip_levels[0].size = stk_width * stk_height * 4;
+            g_state.stocking_texture = sg_make_image(&stk_desc);
+            
+            sg_view_desc stk_view_desc = {};
+            stk_view_desc.texture.image = g_state.stocking_texture;
+            g_state.stocking_texture_view = sg_make_view(&stk_view_desc);
+            
+            stbi_image_free(stk_data);
+            std::cout << "Loaded stocking texture: " << stk_width << "x" << stk_height << std::endl;
+        } else {
+            std::cerr << "Failed to load stocking texture: assets/grey2.png" << std::endl;
+            // Use default texture as fallback
+            g_state.stocking_texture = g_state.default_texture;
+            g_state.stocking_texture_view = g_state.default_texture_view;
+        }
+    }
+    
     // Create skybox shader and pipeline
     sg_shader skybox_shd = sg_make_shader(ibl_skybox_shader_desc(sg_query_backend()));
     sg_pipeline_desc skybox_pip_desc = {};
@@ -1614,6 +1693,23 @@ void frame(void) {
             ImGui::Text("Specular Highlight:");
             ImGui::DragFloat("Specular Power", &g_state.specular_power, 1.0f, 1.0f, 256.0f);
             ImGui::DragFloat("Specular Intensity", &g_state.specular_intensity, 0.1f, 0.0f, 3.0f);
+
+            ImGui::Separator();
+            
+            // Stocking effect parameters (MME Stockingize style)
+            ImGui::Text("Stocking Effect (MME Style):");
+            ImGui::Checkbox("Enable Stocking", &g_state.stocking_enabled);
+            if (g_state.stocking_enabled) {
+                ImGui::SliderFloat("Density", &g_state.stocking_density, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Stocking opacity (0 = transparent, 1 = opaque)");
+                
+                ImGui::SliderFloat("Sigma", &g_state.stocking_sigma, 0.5f, 3.0f, "%.2f");
+                ImGui::SetItemTooltip("Edge detection sharpness (lower = sharper edge transition)");
+                
+                // Show how many parts are marked for stocking
+                size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
+                ImGui::Text("Parts with stocking: %zu / %zu", stocking_count, g_state.is_stocking_part.size());
+            }
 
             ImGui::Separator();
             ImGui::Text("Light Info:");
@@ -2098,18 +2194,6 @@ void frame(void) {
         vs_params.mvp = mvp;
         vs_params.model = model_mat;
         
-        // FS params: view_pos, rim light, and specular parameters
-        mmd_fs_params_t fs_params;
-        fs_params.view_pos = g_state.camera_pos;
-        fs_params.rim_power = g_state.rim_power;
-        fs_params.rim_intensity = g_state.rim_intensity;
-        fs_params.rim_color = g_state.rim_color;
-        fs_params.specular_power = g_state.specular_power;
-        fs_params.specular_intensity = g_state.specular_intensity;
-        fs_params.light_direction = g_state.light_direction;
-        fs_params.light_color = g_state.light_color;
-        fs_params.light_intensity = g_state.light_intensity;
-        
         // Render each part with its own texture
         size_t part_num = g_state.model->GetPartNum();
         for (size_t part_idx = 0; part_idx < part_num; ++part_idx) {
@@ -2118,6 +2202,28 @@ void frame(void) {
             const size_t triangle_num = part.GetTriangleNum();
             
             if (triangle_num == 0) continue;
+            
+            // FS params: view_pos, rim light, specular, and stocking parameters
+            // Set per-part because is_stocking varies per part
+            mmd_fs_params_t fs_params;
+            fs_params.view_pos = g_state.camera_pos;
+            fs_params.rim_power = g_state.rim_power;
+            fs_params.rim_intensity = g_state.rim_intensity;
+            fs_params.rim_color = g_state.rim_color;
+            fs_params.specular_power = g_state.specular_power;
+            fs_params.specular_intensity = g_state.specular_intensity;
+            fs_params.light_direction = g_state.light_direction;
+            fs_params.light_color = g_state.light_color;
+            fs_params.light_intensity = g_state.light_intensity;
+            
+            // Stocking effect parameters
+            bool is_stocking = g_state.stocking_enabled && 
+                               part_idx < g_state.is_stocking_part.size() && 
+                               g_state.is_stocking_part[part_idx];
+            fs_params.is_stocking = is_stocking ? 1.0f : 0.0f;
+            fs_params.stocking_density = g_state.stocking_density;
+            fs_params.stocking_sigma = g_state.stocking_sigma;
+            fs_params._pad0 = 0.0f;
             
             sg_bindings bind = {};
             bind.vertex_buffers[0] = g_state.vertex_buffer;
@@ -2128,13 +2234,17 @@ void frame(void) {
                 ? g_state.material_texture_views[part_idx]
                 : g_state.default_texture_view;
             
-            // Bind only diffuse texture (slot 0)
+            // Bind diffuse texture (slot 0)
             bind.views[0] = material_view;
             bind.samplers[0] = g_state.default_sampler;
             
+            // Bind stocking texture (slot 1)
+            bind.views[1] = g_state.stocking_texture_view;
+            bind.samplers[1] = g_state.default_sampler;
+            
             sg_apply_bindings(&bind);
             sg_apply_uniforms(0, SG_RANGE(vs_params));
-            sg_apply_uniforms(1, SG_RANGE(fs_params)); // fs_params is now binding 1
+            sg_apply_uniforms(2, SG_RANGE(fs_params)); // fs_params is now binding 2
 
             // Draw this part's triangles
             int index_offset = (int)(base_shift * 3);
