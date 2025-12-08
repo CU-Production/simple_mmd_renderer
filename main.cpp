@@ -222,6 +222,12 @@ struct {
     float aniso_spread = 0.15f;           // Spread/width of highlight
     float aniso_noise = 0.4f;             // Noise for fiber randomness
     
+    // Microsurface noise for stocking detail
+    float micro_normal_strength = 0.15f;  // Normal perturbation strength
+    float micro_roughness_var = 0.3f;     // Roughness variation amount
+    float micro_scale = 80.0f;            // UV scale for microsurface detail
+    float micro_weave_scale = 120.0f;     // Scale for weave pattern
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -1728,6 +1734,21 @@ void frame(void) {
                 ImGui::SetItemTooltip("Randomness for fiber irregularity");
                 
                 ImGui::Separator();
+                ImGui::Text("Microsurface Noise:");
+                
+                ImGui::SliderFloat("Normal Strength", &g_state.micro_normal_strength, 0.0f, 0.5f, "%.2f");
+                ImGui::SetItemTooltip("Strength of normal perturbation (bumpy surface)");
+                
+                ImGui::SliderFloat("Roughness Var", &g_state.micro_roughness_var, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Variation in surface roughness");
+                
+                ImGui::SliderFloat("Detail Scale", &g_state.micro_scale, 10.0f, 200.0f, "%.0f");
+                ImGui::SetItemTooltip("Scale of microsurface detail (higher = finer)");
+                
+                ImGui::SliderFloat("Weave Scale", &g_state.micro_weave_scale, 20.0f, 300.0f, "%.0f");
+                ImGui::SetItemTooltip("Scale of weave/knit pattern");
+                
+                ImGui::Separator();
                 // Show how many parts are marked for stocking
                 size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
                 ImGui::Text("Parts with stocking: %zu / %zu", stocking_count, g_state.is_stocking_part.size());
@@ -2251,6 +2272,12 @@ void frame(void) {
             fs_params.aniso_power = g_state.aniso_power;
             fs_params.aniso_spread = g_state.aniso_spread;
             fs_params.aniso_noise = g_state.aniso_noise;
+            
+            // Microsurface noise parameters
+            fs_params.micro_normal_strength = g_state.micro_normal_strength;
+            fs_params.micro_roughness_var = g_state.micro_roughness_var;
+            fs_params.micro_scale = g_state.micro_scale;
+            fs_params.micro_weave_scale = g_state.micro_weave_scale;
             
             sg_bindings bind = {};
             bind.vertex_buffers[0] = g_state.vertex_buffer;
