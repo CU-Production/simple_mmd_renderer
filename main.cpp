@@ -243,6 +243,12 @@ struct {
     // Stocking color tint
     HMM_Vec3 stocking_tint_color = {0.1f, 0.08f, 0.06f};  // Default: black stocking
     
+    // Feature toggles for A/B comparison
+    bool enable_aniso = true;        // Enable anisotropic specular
+    bool enable_microsurface = true; // Enable microsurface noise
+    bool enable_sss = true;          // Enable subsurface scattering
+    bool enable_fresnel = true;      // Enable fresnel effect
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -1828,6 +1834,36 @@ void frame(void) {
                 ImGui::SetItemTooltip("Minimum reflection (F0, typically 0.04 for dielectrics)");
                 
                 ImGui::Separator();
+                ImGui::Text("Feature Toggles (A/B Comparison):");
+                
+                ImGui::Checkbox("Anisotropic Specular", &g_state.enable_aniso);
+                ImGui::SetItemTooltip("Toggle fiber shimmer / anisotropic highlight");
+                
+                ImGui::Checkbox("Microsurface Noise", &g_state.enable_microsurface);
+                ImGui::SetItemTooltip("Toggle normal perturbation and roughness variation");
+                
+                ImGui::Checkbox("Subsurface Scattering", &g_state.enable_sss);
+                ImGui::SetItemTooltip("Toggle skin showing through stocking");
+                
+                ImGui::Checkbox("Fresnel Effect", &g_state.enable_fresnel);
+                ImGui::SetItemTooltip("Toggle edge reflection / shiny edges");
+                
+                // Quick toggle buttons
+                if (ImGui::Button("All On")) {
+                    g_state.enable_aniso = true;
+                    g_state.enable_microsurface = true;
+                    g_state.enable_sss = true;
+                    g_state.enable_fresnel = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("All Off")) {
+                    g_state.enable_aniso = false;
+                    g_state.enable_microsurface = false;
+                    g_state.enable_sss = false;
+                    g_state.enable_fresnel = false;
+                }
+                
+                ImGui::Separator();
                 // Show how many parts are marked for stocking
                 size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
                 ImGui::Text("Parts with stocking: %zu / %zu", stocking_count, g_state.is_stocking_part.size());
@@ -2372,7 +2408,12 @@ void frame(void) {
             
             // Stocking color tint
             fs_params.stocking_tint_color = g_state.stocking_tint_color;
-            fs_params._pad0 = 0.0f;
+            
+            // Feature toggles
+            fs_params.enable_aniso = g_state.enable_aniso ? 1.0f : 0.0f;
+            fs_params.enable_microsurface = g_state.enable_microsurface ? 1.0f : 0.0f;
+            fs_params.enable_sss = g_state.enable_sss ? 1.0f : 0.0f;
+            fs_params.enable_fresnel = g_state.enable_fresnel ? 1.0f : 0.0f;
             
             sg_bindings bind = {};
             bind.vertex_buffers[0] = g_state.vertex_buffer;

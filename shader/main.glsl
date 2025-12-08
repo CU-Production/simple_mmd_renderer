@@ -90,7 +90,12 @@ layout(binding=2) uniform fs_params {
     
     // Stocking color tint
     vec3 stocking_tint_color; // Color to tint the stocking (black, nude, white, etc.)
-    float _pad0;
+    
+    // Feature toggles for A/B comparison
+    float enable_aniso;       // Enable anisotropic specular
+    float enable_microsurface; // Enable microsurface noise
+    float enable_sss;         // Enable subsurface scattering
+    float enable_fresnel;     // Enable fresnel effect
 };
 
 // ============================================
@@ -387,7 +392,8 @@ void main() {
     vec3 N_surface = N;
     float roughness_var = 0.5;
     
-    if (is_stocking > 0.5 && micro_normal_strength > 0.0) {
+    // Microsurface noise (controlled by toggle)
+    if (is_stocking > 0.5 && enable_microsurface > 0.5 && micro_normal_strength > 0.0) {
         N_surface = getMicrosurfaceNormal(uv, N, T, B, micro_normal_strength, micro_scale);
         roughness_var = getMicrosurfaceRoughness(uv, 0.5, micro_roughness_var, micro_scale, micro_weave_scale);
     }
@@ -397,9 +403,9 @@ void main() {
     vec3 H = normalize(V + L);
     float NdotH = max(dot(N_surface, H), 0.0);
     
-    // Calculate Fresnel for stocking
+    // Calculate Fresnel for stocking (controlled by toggle)
     float fresnel_factor = 0.0;
-    if (is_stocking > 0.5) {
+    if (is_stocking > 0.5 && enable_fresnel > 0.5) {
         fresnel_factor = fresnelSchlick(NdotV, fresnel_bias, fresnel_power);
     }
     
@@ -429,41 +435,49 @@ void main() {
     
     // Apply stocking effects
     if (is_stocking > 0.5) {
-        // Subsurface scattering - skin showing through stocking
-        vec3 sss = stockingSSS(
-            N_surface, V, L,
-            albedo, light_color * light_intensity, sss_color,
-            sss_intensity, sss_distortion, sss_power, sss_thickness,
-            NdotV
-        );
-        final_color.rgb += sss;
+        // Subsurface scattering - skin showing through stocking (controlled by toggle)
+        if (enable_sss > 0.5) {
+            vec3 sss = stockingSSS(
+                N_surface, V, L,
+                albedo, light_color * light_intensity, sss_color,
+                sss_intensity, sss_distortion, sss_power, sss_thickness,
+                NdotV
+            );
+            final_color.rgb += sss;
+        }
         
         // Apply stocking texture with fresnel-modulated density and color tint
         final_color = ApplyStocking(final_color, N_surface, V, uv, stocking_density, stocking_sigma, fresnel_factor, stocking_tint_color);
         
-        // Fresnel reflection overlay (shiny edges)
-        vec3 fresnel_reflection = light_color * fresnel_factor * fresnel_intensity;
-        final_color.rgb += fresnel_reflection;
+        // Fresnel reflection overlay (shiny edges) (controlled by toggle)
+        if (enable_fresnel > 0.5) {
+            vec3 fresnel_reflection = light_color * fresnel_factor * fresnel_intensity;
+            final_color.rgb += fresnel_reflection;
+        }
         
-        // Anisotropic specular for fiber shimmer
-        vec3 aniso_spec = StockingAnisotropicSpecular(
-            N_surface, V, L, T, uv,
-            light_color * light_intensity,
-            aniso_intensity,
-            aniso_power,
-            aniso_spread,
-            aniso_noise,
-            roughness_var
-        );
-        final_color.rgb += aniso_spec;
+        // Anisotropic specular for fiber shimmer (controlled by toggle)
+        if (enable_aniso > 0.5) {
+            vec3 aniso_spec = StockingAnisotropicSpecular(
+                N_surface, V, L, T, uv,
+                light_color * light_intensity,
+                aniso_intensity,
+                aniso_power,
+                aniso_spread,
+                aniso_noise,
+                roughness_var
+            );
+            final_color.rgb += aniso_spec;
+            
+            // Micro sparkle (part of anisotropic effect)
+            float sparkle = getMicroSparkle(uv, V, L, N_surface, micro_scale);
+            final_color.rgb += light_color * light_intensity * sparkle * aniso_intensity * 0.3;
+        }
         
-        // Micro sparkle
-        float sparkle = getMicroSparkle(uv, V, L, N_surface, micro_scale);
-        final_color.rgb += light_color * light_intensity * sparkle * aniso_intensity * 0.3;
-        
-        // Weave pattern color variation
-        float weave = getWeavePattern(uv, micro_weave_scale);
-        final_color.rgb *= 1.0 + (weave - 0.5) * micro_roughness_var * 0.1;
+        // Weave pattern color variation (part of microsurface effect)
+        if (enable_microsurface > 0.5) {
+            float weave = getWeavePattern(uv, micro_weave_scale);
+            final_color.rgb *= 1.0 + (weave - 0.5) * micro_roughness_var * 0.1;
+        }
     }
     
     // Gamma correction
