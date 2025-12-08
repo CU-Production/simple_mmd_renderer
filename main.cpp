@@ -216,6 +216,12 @@ struct {
     float stocking_density = 1.0f;        // Stocking density/opacity (0.0 - 1.0)
     float stocking_sigma = 1.4f;          // Gaussian sigma for edge detection
     
+    // Anisotropic specular for stocking (silk/nylon fiber shimmer)
+    float aniso_intensity = 0.3f;         // Anisotropic highlight intensity
+    float aniso_power = 40.0f;            // Anisotropic highlight sharpness
+    float aniso_spread = 0.15f;           // Spread/width of highlight
+    float aniso_noise = 0.4f;             // Noise for fiber randomness
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -1706,6 +1712,22 @@ void frame(void) {
                 ImGui::SliderFloat("Sigma", &g_state.stocking_sigma, 0.5f, 3.0f, "%.2f");
                 ImGui::SetItemTooltip("Edge detection sharpness (lower = sharper edge transition)");
                 
+                ImGui::Separator();
+                ImGui::Text("Anisotropic Specular (Fiber Shimmer):");
+                
+                ImGui::SliderFloat("Aniso Intensity", &g_state.aniso_intensity, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Intensity of anisotropic highlight (silk/nylon shimmer)");
+                
+                ImGui::SliderFloat("Aniso Power", &g_state.aniso_power, 10.0f, 100.0f, "%.0f");
+                ImGui::SetItemTooltip("Sharpness of anisotropic highlight (higher = sharper)");
+                
+                ImGui::SliderFloat("Aniso Spread", &g_state.aniso_spread, 0.0f, 0.5f, "%.2f");
+                ImGui::SetItemTooltip("Spread/width of dual-lobe highlight");
+                
+                ImGui::SliderFloat("Aniso Noise", &g_state.aniso_noise, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Randomness for fiber irregularity");
+                
+                ImGui::Separator();
                 // Show how many parts are marked for stocking
                 size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
                 ImGui::Text("Parts with stocking: %zu / %zu", stocking_count, g_state.is_stocking_part.size());
@@ -2223,7 +2245,12 @@ void frame(void) {
             fs_params.is_stocking = is_stocking ? 1.0f : 0.0f;
             fs_params.stocking_density = g_state.stocking_density;
             fs_params.stocking_sigma = g_state.stocking_sigma;
-            fs_params._pad0 = 0.0f;
+            
+            // Anisotropic specular parameters
+            fs_params.aniso_intensity = g_state.aniso_intensity;
+            fs_params.aniso_power = g_state.aniso_power;
+            fs_params.aniso_spread = g_state.aniso_spread;
+            fs_params.aniso_noise = g_state.aniso_noise;
             
             sg_bindings bind = {};
             bind.vertex_buffers[0] = g_state.vertex_buffer;
