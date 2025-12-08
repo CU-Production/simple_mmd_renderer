@@ -75,8 +75,24 @@ layout(binding=2) uniform fs_params {
     float micro_roughness_var;
     float micro_scale;
     float micro_weave_scale;
+    
+    // Subsurface scattering parameters
+    vec3 sss_color;           // Color of subsurface scattering (skin tone)
+    float sss_intensity;      // SSS intensity (0.0 - 1.0)
+    float sss_distortion;     // Light direction distortion for SSS
+    float sss_power;          // Falloff power for SSS
+    float sss_thickness;      // Simulated thickness (affects transmission)
+    
+    // Fresnel parameters
+    float fresnel_power;      // Fresnel falloff power (typically 5.0)
+    float fresnel_intensity;  // Fresnel reflection intensity
+    float fresnel_bias;       // Minimum fresnel (F0 for dielectrics)
+    float _pad0;
 };
 
+// ============================================
+// Color space conversion
+// ============================================
 float LinearToSrgb(float channel) {
     if (channel <= 0.0031308) {
         return 12.92 * channel;
@@ -101,6 +117,9 @@ vec3 SrgbToLinear(vec3 srgb) {
     return vec3(SrgbToLinear(srgb.r), SrgbToLinear(srgb.g), SrgbToLinear(srgb.b));
 }
 
+// ============================================
+// Noise functions
+// ============================================
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
@@ -134,6 +153,9 @@ float fbm(vec2 p, int octaves) {
     return value / total_amplitude;
 }
 
+// ============================================
+// Microsurface functions
+// ============================================
 vec3 getMicrosurfaceNormal(vec2 tex_uv, vec3 N, vec3 T, vec3 B, float strength, float scale) {
     vec2 uv_scaled = tex_uv * scale;
     
@@ -194,6 +216,9 @@ float getMicroSparkle(vec2 tex_uv, vec3 V, vec3 L, vec3 N, float scale) {
     return sparkle;
 }
 
+// ============================================
+// Anisotropic specular (Kajiya-Kay)
+// ============================================
 float KajiyaKaySpecular(vec3 T, vec3 H, float power) {
     float TdotH = dot(T, H);
     float sinTH = sqrt(max(0.0, 1.0 - TdotH * TdotH));
@@ -204,6 +229,73 @@ vec3 ShiftTangent(vec3 T, vec3 N, float shift) {
     return normalize(T + N * shift);
 }
 
+// ============================================
+// Fresnel effect (Schlick approximation)
+// ============================================
+float fresnelSchlick(float NdotV, float F0, float power) {
+    return F0 + (1.0 - F0) * pow(max(1.0 - NdotV, 0.0), power);
+}
+
+vec3 fresnelSchlickVec3(float NdotV, vec3 F0, float power) {
+    return F0 + (1.0 - F0) * pow(max(1.0 - NdotV, 0.0), power);
+}
+
+// ============================================
+// Subsurface Scattering (SSS)
+// Fast approximation for thin translucent materials
+// ============================================
+vec3 subsurfaceScattering(
+    vec3 N, vec3 V, vec3 L, 
+    vec3 lightColor, vec3 sssColor,
+    float intensity, float distortion, float power, float thickness
+) {
+    // Distort light direction through the surface
+    vec3 L_distorted = L + N * distortion;
+    
+    // Calculate view-dependent transmission
+    float VdotL = max(dot(V, -L_distorted), 0.0);
+    float transmission = pow(VdotL, power) * thickness;
+    
+    // Back-lighting contribution (light coming through from behind)
+    float NdotL_back = max(dot(-N, L), 0.0);
+    float backlight = pow(NdotL_back, power * 0.5) * thickness;
+    
+    // Combine transmission and backlight
+    float sss_factor = (transmission + backlight * 0.5) * intensity;
+    
+    return lightColor * sssColor * sss_factor;
+}
+
+// Enhanced SSS with wrap lighting for stocking
+vec3 stockingSSS(
+    vec3 N, vec3 V, vec3 L,
+    vec3 albedo, vec3 lightColor, vec3 sssColor,
+    float intensity, float distortion, float power, float thickness,
+    float NdotV
+) {
+    // Basic SSS transmission
+    vec3 sss = subsurfaceScattering(N, V, L, lightColor, sssColor, intensity, distortion, power, thickness);
+    
+    // Wrap lighting for soft shadow transition
+    float NdotL = dot(N, L);
+    float wrap = 0.5;
+    float wrapDiffuse = max(0.0, (NdotL + wrap) / (1.0 + wrap));
+    
+    // Edge-enhanced SSS (more visible at grazing angles where stocking is denser)
+    float edgeFactor = 1.0 - NdotV;
+    float edgeSSS = pow(edgeFactor, 2.0) * intensity * 0.5;
+    
+    // Blend skin color through stocking based on view angle
+    // At center (high NdotV): more skin shows through
+    // At edges (low NdotV): stocking color dominates
+    vec3 skinBleed = albedo * sssColor * wrapDiffuse * intensity * NdotV;
+    
+    return sss + skinBleed + lightColor * sssColor * edgeSSS;
+}
+
+// ============================================
+// Stocking effect (MME Stockingize style)
+// ============================================
 float Gaussian(float x, float sigma) {
     return exp(-(x * x) / (2.0 * sigma * sigma));
 }
@@ -219,13 +311,16 @@ vec4 AlphaBlend(vec4 bg, vec4 fg) {
     return vec4(out_rgb, out_alpha);
 }
 
-vec4 ApplyStocking(vec4 base_color, vec3 N, vec3 V, vec2 tex_uv, float density, float sigma) {
+vec4 ApplyStocking(vec4 base_color, vec3 N, vec3 V, vec2 tex_uv, float density, float sigma, float fresnel_factor) {
     float NdotV = dot(N, V);
     float gaussian_val = Gaussian(NdotV, sigma);
     float u = 1.0 - gaussian_val;
     
     vec4 stocking_color = texture(sampler2D(stocking_texture, stocking_smp), vec2(u, tex_uv.y));
-    stocking_color.a *= density;
+    
+    // Modulate density with fresnel - edges are more opaque
+    float fresnel_density = mix(density * 0.7, density, fresnel_factor);
+    stocking_color.a *= fresnel_density;
     
     return AlphaBlend(base_color, stocking_color);
 }
@@ -282,14 +377,22 @@ void main() {
     }
     
     float NdotV = max(dot(N_surface, V), 0.0);
+    float NdotL = max(dot(N_surface, L), 0.0);
+    vec3 H = normalize(V + L);
+    float NdotH = max(dot(N_surface, H), 0.0);
+    
+    // Calculate Fresnel for stocking
+    float fresnel_factor = 0.0;
+    if (is_stocking > 0.5) {
+        fresnel_factor = fresnelSchlick(NdotV, fresnel_bias, fresnel_power);
+    }
+    
+    // Rim Light
     float rim_factor = 1.0 - NdotV;
     rim_factor = pow(abs(rim_factor), rim_power);
     vec3 rim_light = rim_color * rim_intensity * rim_factor;
     
-    vec3 H = normalize(V + L);
-    float NdotH = max(dot(N_surface, H), 0.0);
-    float NdotL = max(dot(N_surface, L), 0.0);
-    
+    // Specular Highlight (Blinn-Phong)
     float specular_factor = 0.0;
     if (NdotL > 0.0) {
         float adjusted_power = specular_power;
@@ -300,15 +403,33 @@ void main() {
     }
     vec3 specular_highlight = light_color * light_intensity * specular_intensity * specular_factor;
     
+    // Diffuse lighting
     const float diffuse_strength = 0.25;
     vec3 diffuse_light = light_color * light_intensity * diffuse_strength * max(NdotL, 0.0);
     
+    // Base lit color
     vec3 lit_color = albedo * (vec3(0.9) + diffuse_light) + rim_light + specular_highlight;
     vec4 final_color = vec4(lit_color, alpha);
     
+    // Apply stocking effects
     if (is_stocking > 0.5) {
-        final_color = ApplyStocking(final_color, N_surface, V, uv, stocking_density, stocking_sigma);
+        // Subsurface scattering - skin showing through stocking
+        vec3 sss = stockingSSS(
+            N_surface, V, L,
+            albedo, light_color * light_intensity, sss_color,
+            sss_intensity, sss_distortion, sss_power, sss_thickness,
+            NdotV
+        );
+        final_color.rgb += sss;
         
+        // Apply stocking texture with fresnel-modulated density
+        final_color = ApplyStocking(final_color, N_surface, V, uv, stocking_density, stocking_sigma, fresnel_factor);
+        
+        // Fresnel reflection overlay (shiny edges)
+        vec3 fresnel_reflection = light_color * fresnel_factor * fresnel_intensity;
+        final_color.rgb += fresnel_reflection;
+        
+        // Anisotropic specular for fiber shimmer
         vec3 aniso_spec = StockingAnisotropicSpecular(
             N_surface, V, L, T, uv,
             light_color * light_intensity,
@@ -320,13 +441,16 @@ void main() {
         );
         final_color.rgb += aniso_spec;
         
+        // Micro sparkle
         float sparkle = getMicroSparkle(uv, V, L, N_surface, micro_scale);
         final_color.rgb += light_color * light_intensity * sparkle * aniso_intensity * 0.3;
         
+        // Weave pattern color variation
         float weave = getWeavePattern(uv, micro_weave_scale);
         final_color.rgb *= 1.0 + (weave - 0.5) * micro_roughness_var * 0.1;
     }
     
+    // Gamma correction
     final_color.rgb = SrgbToLinear(final_color.rgb);
     
     frag_color = final_color;

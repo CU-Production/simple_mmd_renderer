@@ -228,6 +228,18 @@ struct {
     float micro_scale = 80.0f;            // UV scale for microsurface detail
     float micro_weave_scale = 120.0f;     // Scale for weave pattern
     
+    // Subsurface scattering for stocking (skin showing through)
+    HMM_Vec3 sss_color = {1.0f, 0.85f, 0.75f};  // Warm skin tone
+    float sss_intensity = 0.25f;           // SSS intensity
+    float sss_distortion = 0.2f;           // Light direction distortion
+    float sss_power = 2.0f;                // Falloff power
+    float sss_thickness = 0.8f;            // Simulated material thickness
+    
+    // Fresnel effect for stocking (shiny edges)
+    float fresnel_power = 4.0f;            // Fresnel falloff power
+    float fresnel_intensity = 0.15f;       // Fresnel reflection strength
+    float fresnel_bias = 0.04f;            // Minimum fresnel (F0)
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -1749,6 +1761,36 @@ void frame(void) {
                 ImGui::SetItemTooltip("Scale of weave/knit pattern");
                 
                 ImGui::Separator();
+                ImGui::Text("Subsurface Scattering (SSS):");
+                
+                ImGui::ColorEdit3("SSS Color", &g_state.sss_color.X);
+                ImGui::SetItemTooltip("Color of light passing through (skin tone)");
+                
+                ImGui::SliderFloat("SSS Intensity", &g_state.sss_intensity, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Strength of subsurface scattering effect");
+                
+                ImGui::SliderFloat("SSS Distortion", &g_state.sss_distortion, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Light distortion through material");
+                
+                ImGui::SliderFloat("SSS Power", &g_state.sss_power, 0.5f, 5.0f, "%.1f");
+                ImGui::SetItemTooltip("Falloff sharpness of SSS");
+                
+                ImGui::SliderFloat("SSS Thickness", &g_state.sss_thickness, 0.0f, 1.0f, "%.2f");
+                ImGui::SetItemTooltip("Simulated material thickness");
+                
+                ImGui::Separator();
+                ImGui::Text("Fresnel Effect:");
+                
+                ImGui::SliderFloat("Fresnel Power", &g_state.fresnel_power, 1.0f, 8.0f, "%.1f");
+                ImGui::SetItemTooltip("Edge reflection falloff (higher = sharper edge)");
+                
+                ImGui::SliderFloat("Fresnel Intensity", &g_state.fresnel_intensity, 0.0f, 0.5f, "%.2f");
+                ImGui::SetItemTooltip("Strength of edge reflection");
+                
+                ImGui::SliderFloat("Fresnel Bias", &g_state.fresnel_bias, 0.0f, 0.2f, "%.3f");
+                ImGui::SetItemTooltip("Minimum reflection (F0, typically 0.04 for dielectrics)");
+                
+                ImGui::Separator();
                 // Show how many parts are marked for stocking
                 size_t stocking_count = std::count(g_state.is_stocking_part.begin(), g_state.is_stocking_part.end(), true);
                 ImGui::Text("Parts with stocking: %zu / %zu", stocking_count, g_state.is_stocking_part.size());
@@ -2278,6 +2320,19 @@ void frame(void) {
             fs_params.micro_roughness_var = g_state.micro_roughness_var;
             fs_params.micro_scale = g_state.micro_scale;
             fs_params.micro_weave_scale = g_state.micro_weave_scale;
+            
+            // Subsurface scattering parameters
+            fs_params.sss_color = g_state.sss_color;
+            fs_params.sss_intensity = g_state.sss_intensity;
+            fs_params.sss_distortion = g_state.sss_distortion;
+            fs_params.sss_power = g_state.sss_power;
+            fs_params.sss_thickness = g_state.sss_thickness;
+            
+            // Fresnel parameters
+            fs_params.fresnel_power = g_state.fresnel_power;
+            fs_params.fresnel_intensity = g_state.fresnel_intensity;
+            fs_params.fresnel_bias = g_state.fresnel_bias;
+            fs_params._pad0 = 0.0f;
             
             sg_bindings bind = {};
             bind.vertex_buffers[0] = g_state.vertex_buffer;
