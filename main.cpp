@@ -240,6 +240,9 @@ struct {
     float fresnel_intensity = 0.15f;       // Fresnel reflection strength
     float fresnel_bias = 0.04f;            // Minimum fresnel (F0)
     
+    // Stocking color tint
+    HMM_Vec3 stocking_tint_color = {0.1f, 0.08f, 0.06f};  // Default: black stocking
+    
     // Shadow mapping resources
     sg_image shadow_map = {0};
     sg_view shadow_map_view = {0};
@@ -1724,6 +1727,40 @@ void frame(void) {
             ImGui::Text("Stocking Effect (MME Style):");
             ImGui::Checkbox("Enable Stocking", &g_state.stocking_enabled);
             if (g_state.stocking_enabled) {
+                // Stocking color with presets
+                ImGui::Text("Stocking Color:");
+                ImGui::ColorEdit3("Tint Color", &g_state.stocking_tint_color.X);
+                ImGui::SetItemTooltip("Color of the stocking material");
+                
+                // Color presets
+                if (ImGui::Button("Black")) {
+                    g_state.stocking_tint_color = {0.1f, 0.08f, 0.06f};
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Nude")) {
+                    g_state.stocking_tint_color = {0.85f, 0.65f, 0.55f};
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("White")) {
+                    g_state.stocking_tint_color = {0.95f, 0.95f, 0.95f};
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Navy")) {
+                    g_state.stocking_tint_color = {0.1f, 0.1f, 0.2f};
+                }
+                if (ImGui::Button("Gray")) {
+                    g_state.stocking_tint_color = {0.3f, 0.3f, 0.3f};
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Red")) {
+                    g_state.stocking_tint_color = {0.6f, 0.1f, 0.1f};
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Purple")) {
+                    g_state.stocking_tint_color = {0.4f, 0.15f, 0.5f};
+                }
+                
+                ImGui::Separator();
                 ImGui::SliderFloat("Density", &g_state.stocking_density, 0.0f, 1.0f, "%.2f");
                 ImGui::SetItemTooltip("Stocking opacity (0 = transparent, 1 = opaque)");
                 
@@ -2332,6 +2369,9 @@ void frame(void) {
             fs_params.fresnel_power = g_state.fresnel_power;
             fs_params.fresnel_intensity = g_state.fresnel_intensity;
             fs_params.fresnel_bias = g_state.fresnel_bias;
+            
+            // Stocking color tint
+            fs_params.stocking_tint_color = g_state.stocking_tint_color;
             fs_params._pad0 = 0.0f;
             
             sg_bindings bind = {};

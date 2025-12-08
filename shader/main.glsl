@@ -87,6 +87,9 @@ layout(binding=2) uniform fs_params {
     float fresnel_power;      // Fresnel falloff power (typically 5.0)
     float fresnel_intensity;  // Fresnel reflection intensity
     float fresnel_bias;       // Minimum fresnel (F0 for dielectrics)
+    
+    // Stocking color tint
+    vec3 stocking_tint_color; // Color to tint the stocking (black, nude, white, etc.)
     float _pad0;
 };
 
@@ -311,16 +314,29 @@ vec4 AlphaBlend(vec4 bg, vec4 fg) {
     return vec4(out_rgb, out_alpha);
 }
 
-vec4 ApplyStocking(vec4 base_color, vec3 N, vec3 V, vec2 tex_uv, float density, float sigma, float fresnel_factor) {
+vec4 ApplyStocking(vec4 base_color, vec3 N, vec3 V, vec2 tex_uv, float density, float sigma, float fresnel_factor, vec3 tint_color) {
     float NdotV = dot(N, V);
     float gaussian_val = Gaussian(NdotV, sigma);
     float u = 1.0 - gaussian_val;
     
-    vec4 stocking_color = texture(sampler2D(stocking_texture, stocking_smp), vec2(u, tex_uv.y));
+    vec4 stocking_sample = texture(sampler2D(stocking_texture, stocking_smp), vec2(u, tex_uv.y));
+    
+    // The texture is grayscale - use it as intensity and apply tint color
+    // Darker areas of the texture = more stocking color visible
+    // Lighter areas = more transparent
+    float gray = stocking_sample.r; // Grayscale intensity
+    
+    // Invert so darker texture = more opaque stocking
+    float opacity = 1.0 - gray;
+    
+    // Apply tint color to the stocking
+    vec3 tinted_color = tint_color * (1.0 - gray * 0.5); // Preserve some shading variation
     
     // Modulate density with fresnel - edges are more opaque
     float fresnel_density = mix(density * 0.7, density, fresnel_factor);
-    stocking_color.a *= fresnel_density;
+    float final_alpha = opacity * fresnel_density * stocking_sample.a;
+    
+    vec4 stocking_color = vec4(tinted_color, final_alpha);
     
     return AlphaBlend(base_color, stocking_color);
 }
@@ -422,8 +438,8 @@ void main() {
         );
         final_color.rgb += sss;
         
-        // Apply stocking texture with fresnel-modulated density
-        final_color = ApplyStocking(final_color, N_surface, V, uv, stocking_density, stocking_sigma, fresnel_factor);
+        // Apply stocking texture with fresnel-modulated density and color tint
+        final_color = ApplyStocking(final_color, N_surface, V, uv, stocking_density, stocking_sigma, fresnel_factor, stocking_tint_color);
         
         // Fresnel reflection overlay (shiny edges)
         vec3 fresnel_reflection = light_color * fresnel_factor * fresnel_intensity;
