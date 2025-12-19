@@ -1803,7 +1803,8 @@ void frame(void) {
             // Run physics simulation if enabled and not cleaning up
             if (g_state.physics_enabled && g_state.physics_reactor) {
                 // Step physics simulation (dt is in seconds, MMD uses 30 FPS = 1/30 second per frame)
-                const float physics_dt = 1.0f / 30.0f;
+                // const float physics_dt = 1.0f / 60.0f;
+                const float physics_dt = dt;
                 g_state.physics_reactor->React(physics_dt);
             }
             

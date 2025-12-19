@@ -103,7 +103,7 @@ void Body::SetPositionAndRotationInternal(RVec3Arg inPosition, QuatArg inRotatio
 {
 	JPH_ASSERT(BodyAccess::sCheckRights(BodyAccess::sPositionAccess(), BodyAccess::EAccess::ReadWrite));
 
-	mPosition = inPosition + inRotation * mShape->GetCenterOfMass();
+	mPosition = inPosition + inRotation.Normalized() * mShape->GetCenterOfMass();
 	mRotation = inRotation;
 
 	// Initialize bounding box

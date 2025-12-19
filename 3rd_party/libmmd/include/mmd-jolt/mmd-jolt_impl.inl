@@ -78,7 +78,7 @@ inline JPH::RMat44 JoltPhysicsReactor::Matrix4fToRMat44(const Matrix4f& m) {
         JPH::Vec4(m.r.v[0].v[0], m.r.v[0].v[1], m.r.v[0].v[2], m.r.v[0].v[3]),
         JPH::Vec4(m.r.v[1].v[0], m.r.v[1].v[1], m.r.v[1].v[2], m.r.v[1].v[3]),
         JPH::Vec4(m.r.v[2].v[0], m.r.v[2].v[1], m.r.v[2].v[2], m.r.v[2].v[3]),
-        JPH::Vec3(m.r.v[3].v[0], m.r.v[3].v[1], m.r.v[3].v[2])
+        JPH::DVec3(m.r.v[3].v[0], m.r.v[3].v[1], m.r.v[3].v[2])
     );
 }
 
@@ -86,7 +86,7 @@ inline void JoltPhysicsReactor::RMat44ToMatrix4f(const JPH::RMat44& src, Matrix4
     JPH::Vec4 c0 = src.GetColumn4(0);
     JPH::Vec4 c1 = src.GetColumn4(1);
     JPH::Vec4 c2 = src.GetColumn4(2);
-    JPH::Vec3 c3 = src.GetTranslation();
+    JPH::DVec3 c3 = src.GetTranslation();
     
     dst.r.v[0].v[0] = c0.GetX(); dst.r.v[0].v[1] = c0.GetY(); dst.r.v[0].v[2] = c0.GetZ(); dst.r.v[0].v[3] = c0.GetW();
     dst.r.v[1].v[0] = c1.GetX(); dst.r.v[1].v[1] = c1.GetY(); dst.r.v[1].v[2] = c1.GetZ(); dst.r.v[1].v[3] = c1.GetW();
@@ -95,7 +95,7 @@ inline void JoltPhysicsReactor::RMat44ToMatrix4f(const JPH::RMat44& src, Matrix4
 }
 
 inline JoltPhysicsReactor::JoltPhysicsReactor() 
-    : has_floor_(true), gravity_strength_(9.8f) 
+    : has_floor_(true), gravity_strength_(9.8f)
 {
     // Initialize Jolt (should be called once per application, but safe to call multiple times)
     JPH::RegisterDefaultAllocator();
@@ -111,17 +111,24 @@ inline JoltPhysicsReactor::JoltPhysicsReactor()
     JPH::RegisterTypes();
     
     // Create allocators
-    temp_allocator_ = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024); // 10 MB
+    temp_allocator_ = std::make_unique<JPH::TempAllocatorImpl>(20 * 1024 * 1024); // 20 MB
     job_system_ = std::make_unique<JPH::JobSystemThreadPool>(
         JPH::cMaxPhysicsJobs, 
         JPH::cMaxPhysicsBarriers, 
         std::thread::hardware_concurrency() - 1
     );
     
-    // Create layer interfaces
-    broad_phase_layer_interface_ = std::make_unique<JoltBroadPhaseLayerInterface>();
-    object_vs_broadphase_layer_filter_ = std::make_unique<JoltObjectVsBroadPhaseLayerFilter>();
-    object_layer_pair_filter_ = std::make_unique<JoltObjectLayerPairFilter>();
+    // Create layer interfaces for mask-based collision filtering (similar to Bullet)
+    // This allows us to use MMD's collision group/mask system
+    broad_phase_layer_interface_ = std::make_unique<JPH::BroadPhaseLayerInterfaceMask>(JoltBroadPhaseLayers::NUM_LAYERS);
+    // Configure broadphase layers:
+    // Layer 0 (NON_MOVING): Static objects only (ground plane with group bit 0)
+    broad_phase_layer_interface_->ConfigureLayer(JoltBroadPhaseLayers::NON_MOVING, 0, 0);
+    // Layer 1 (MOVING): All moving objects (any group bits set)
+    broad_phase_layer_interface_->ConfigureLayer(JoltBroadPhaseLayers::MOVING, 0xFF, 0);
+    
+    object_vs_broadphase_layer_filter_ = std::make_unique<JPH::ObjectVsBroadPhaseLayerFilterMask>(*broad_phase_layer_interface_);
+    object_layer_pair_filter_ = std::make_unique<JPH::ObjectLayerPairFilterMask>();
     
     // Create physics system
     const JPH::uint cMaxBodies = 65536;
@@ -137,6 +144,15 @@ inline JoltPhysicsReactor::JoltPhysicsReactor()
         *object_layer_pair_filter_
     );
     
+    // Configure physics settings for better stability (important for MMD cloth/hair simulation)
+    JPH::PhysicsSettings settings = physics_system_->GetPhysicsSettings();
+    settings.mNumVelocitySteps = 10;          // Increase solver iterations for stability (default: 10)
+    settings.mNumPositionSteps = 2;           // Increase position iterations (default: 2)
+    settings.mBaumgarte = 0.1f;               // Reduce Baumgarte stabilization for smoother motion (default: 0.2)
+    settings.mSpeculativeContactDistance = 0.01f;  // Reduce speculative contacts
+    settings.mPenetrationSlop = 0.01f;        // Reduce penetration allowance
+    physics_system_->SetPhysicsSettings(settings);
+    
     // Set gravity (scaled by 10 like in Bullet version, since MMD uses 0.1m as unit)
     gravity_direction_ = JPH::Vec3(0.0f, -1.0f, 0.0f);
     physics_system_->SetGravity(gravity_direction_ * gravity_strength_ * 10.0f);
@@ -147,12 +163,13 @@ inline JoltPhysicsReactor::JoltPhysicsReactor()
     JPH::PlaneShapeSettings ground_shape_settings(JPH::Plane(JPH::Vec3::sAxisY(), 0.0f));
     ground_shape_settings.SetEmbedded();
     
+    // Ground uses special layer that collides with all groups
     JPH::BodyCreationSettings ground_settings(
         ground_shape_settings.Create().Get(),
         JPH::RVec3::sZero(),
         JPH::Quat::sIdentity(),
         JPH::EMotionType::Static,
-        JoltLayers::NON_MOVING
+        GetGroundObjectLayer()  // Use mask-based layer for ground
     );
     ground_settings.mFriction = 0.265f;
     ground_settings.mRestitution = 0.0f;
@@ -168,8 +185,8 @@ inline JoltPhysicsReactor::~JoltPhysicsReactor() {
     
     // Remove ground
     JPH::BodyInterface& body_interface = physics_system_->GetBodyInterface();
-    body_interface.RemoveBody(ground_body_id_);
-    body_interface.DestroyBody(ground_body_id_);
+    // body_interface.RemoveBody(ground_body_id_);
+    // body_interface.DestroyBody(ground_body_id_);
     
     // Cleanup in reverse order
     physics_system_.reset();
@@ -272,14 +289,18 @@ inline void JoltPhysicsReactor::AddPoser(Poser& poser) {
         
         // Determine motion type
         JPH::EMotionType motion_type;
-        JPH::ObjectLayer object_layer;
         if (body.GetType() == Model::RigidBody::RIGID_TYPE_KINEMATIC) {
             motion_type = JPH::EMotionType::Kinematic;
-            object_layer = JoltLayers::MOVING;
         } else {
             motion_type = JPH::EMotionType::Dynamic;
-            object_layer = JoltLayers::MOVING;
         }
+        
+        // Create ObjectLayer from MMD collision group and mask
+        // This is the KEY to preventing cloth/hair explosion!
+        // Bodies only collide if (group1 & mask2) && (group2 & mask1)
+        uint32_t collision_group = body.GetCollisionGroup();
+        uint32_t collision_mask = static_cast<uint32_t>(body.GetCollisionMask().to_ulong());
+        JPH::ObjectLayer object_layer = MakeMMDObjectLayer(collision_group, collision_mask);
         
         // Get initial position from bone
         BoneImageReference bone_image = GetPoserBoneImage(poser, body.GetAssociatedBoneIndex());
@@ -300,15 +321,21 @@ inline void JoltPhysicsReactor::AddPoser(Poser& poser) {
             body_settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
             body_settings.mMassPropertiesOverride.mMass = body.GetMass();
         }
-        body_settings.mLinearDamping = body.GetTranslateDamp();
-        body_settings.mAngularDamping = body.GetRotateDamp();
+        
+        // Damping: MMD uses values 0-1, Jolt uses similar range
+        float linear_damp = body.GetTranslateDamp();
+        float angular_damp = body.GetRotateDamp();
+        
+        // Use original damping values (MMD models are tuned for these)
+        body_settings.mLinearDamping = linear_damp;
+        body_settings.mAngularDamping = angular_damp;
+        
         body_settings.mRestitution = body.GetRestitution();
         body_settings.mFriction = body.GetFriction();
         body_settings.mAllowSleeping = false;  // Keep bodies always active like Bullet version
         
-        // Set collision filtering based on collision group/mask
-        // Note: Jolt uses a different collision filtering system, this is simplified
-        // For full MMD compatibility, you may need to implement a custom ObjectLayerPairFilter
+        // Use LinearCast for better collision detection with fast-moving objects
+        body_settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
         
         JPH::BodyID body_id = body_interface.CreateAndAddBody(body_settings, JPH::EActivation::Activate);
         body_ids.push_back(body_id);
@@ -367,25 +394,29 @@ inline void JoltPhysicsReactor::AddPoser(Poser& poser) {
         constraint_settings.SetLimitedAxis(JPH::SixDOFConstraintSettings::RotationZ, rotation_low_limit.p.z, rotation_high_limit.p.z);
         
         // Set spring settings for soft limits (approximating Bullet's spring behavior)
+        // Bullet uses stiffness directly, Jolt uses frequency (Hz) and damping ratio
+        // frequency = sqrt(stiffness / mass) / (2 * PI)
+        // For simplicity, we use a fixed effective mass of 1.0 for the conversion
         const Vector3f& spring_translate = constraint.GetSpringTranslate();
         const Vector3f& spring_rotate = constraint.GetSpringRotate();
         
         // Jolt spring settings for translation limits
         for (int j = 0; j < 3; ++j) {
             if (spring_translate.v[j] > 0.0f) {
-                constraint_settings.mLimitsSpringSettings[j].mFrequency = std::sqrt(spring_translate.v[j]) / (2.0f * 3.14159f);
-                constraint_settings.mLimitsSpringSettings[j].mDamping = 0.5f;
+                // Convert Bullet stiffness to Jolt frequency
+                // Use lower frequency for more stable, less jittery behavior
+                float stiffness = spring_translate.v[j];
+                float frequency = std::sqrt(stiffness) / (2.0f * 3.14159f);
+                // Clamp frequency to prevent instability
+                frequency = std::min(frequency, 10.0f);  // Max 10 Hz
+                constraint_settings.mLimitsSpringSettings[j].mFrequency = frequency;
+                constraint_settings.mLimitsSpringSettings[j].mDamping = 0.8f;  // Higher damping for stability
             }
         }
         
-        // Note: Jolt doesn't directly support spring settings for rotation limits like Bullet
-        // For now we use the motor settings to approximate spring behavior
-        for (int j = 0; j < 3; ++j) {
-            if (spring_rotate.v[j] > 0.0f) {
-                int axis = JPH::SixDOFConstraintSettings::RotationX + j;
-                constraint_settings.mMotorSettings[axis].mSpringSettings.mFrequency = std::sqrt(spring_rotate.v[j]) / (2.0f * 3.14159f);
-                constraint_settings.mMotorSettings[axis].mSpringSettings.mDamping = 0.5f;
-            }
+        // Add friction to all axes for damping
+        for (int j = 0; j < 6; ++j) {
+            constraint_settings.mMaxFriction[j] = 0.1f;  // Add friction for stability
         }
         
         // Create constraint
@@ -456,20 +487,25 @@ inline void JoltPhysicsReactor::React(float step) {
         for (auto& motion_state : pair.second) {
             if (motion_state->passive) {
                 // Update kinematic body position from bone
+                // Use SetPositionAndRotation for immediate update (more stable for animation-driven bones)
+                // MoveKinematic can cause jitter due to velocity calculation issues
                 JPH::RMat44 new_transform = motion_state->GetWorldTransform();
-                body_interface.MoveKinematic(
+                body_interface.SetPositionAndRotation(
                     motion_state->body_id,
                     new_transform.GetTranslation(),
                     new_transform.GetQuaternion(),
-                    step
+                    JPH::EActivation::Activate
                 );
             }
         }
     }
     
     // Step physics simulation
-    // Jolt recommends multiple collision steps for stability
-    const int collision_steps = 1;
+    // Use sub-stepping for stability: divide the step into smaller increments
+    // Too many steps can cause instability, 1-2 is usually enough for 30fps
+    const int collision_steps = 4;
+    
+    // Sub-step the simulation for stability (similar to Bullet's stepSimulation with max substeps)
     physics_system_->Update(step, collision_steps, temp_allocator_.get(), job_system_.get());
     
     // Synchronize bone transforms from physics
