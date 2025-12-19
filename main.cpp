@@ -20,7 +20,7 @@
 #include "ImSequencer.h"
 
 #include "mmd/mmd.hxx"
-#include "mmd-bullet/mmd-bullet.hxx"
+#include "mmd-jolt/mmd-jolt.hxx"
 #include "HandmadeMath.h"
 #include "shader/main.glsl.h"
 #include "shader/ground.glsl.h"
@@ -133,7 +133,7 @@ struct {
     std::shared_ptr<mmd::Motion> motion;
     std::unique_ptr<mmd::Poser> poser;
     std::unique_ptr<mmd::MotionPlayer> motion_player;
-    std::unique_ptr<mmd::BulletPhysicsReactor> physics_reactor;
+    std::unique_ptr<mmd::JoltPhysicsReactor> physics_reactor;
     bool physics_enabled = true;  // Enable physics simulation by default
     bool physics_window_open = false;  // Physics control window visibility
 
@@ -663,7 +663,7 @@ bool LoadPMXModel(const std::string& filename) {
             g_state.poser = std::make_unique<mmd::Poser>(*g_state.model);
             
             // Initialize physics engine
-            g_state.physics_reactor = std::make_unique<mmd::BulletPhysicsReactor>();
+            g_state.physics_reactor = std::make_unique<mmd::JoltPhysicsReactor>();
             if (g_state.physics_reactor && g_state.poser) {
                 g_state.physics_reactor->AddPoser(*g_state.poser);
                 std::cout << "  Physics engine initialized" << std::endl;
