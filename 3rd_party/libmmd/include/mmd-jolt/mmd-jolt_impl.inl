@@ -78,7 +78,7 @@ inline JPH::RMat44 JoltPhysicsReactor::Matrix4fToRMat44(const Matrix4f& m) {
         JPH::Vec4(m.r.v[0].v[0], m.r.v[0].v[1], m.r.v[0].v[2], m.r.v[0].v[3]),
         JPH::Vec4(m.r.v[1].v[0], m.r.v[1].v[1], m.r.v[1].v[2], m.r.v[1].v[3]),
         JPH::Vec4(m.r.v[2].v[0], m.r.v[2].v[1], m.r.v[2].v[2], m.r.v[2].v[3]),
-        JPH::DVec3(m.r.v[3].v[0], m.r.v[3].v[1], m.r.v[3].v[2])
+        JPH::Vec3(m.r.v[3].v[0], m.r.v[3].v[1], m.r.v[3].v[2])
     );
 }
 
@@ -86,7 +86,7 @@ inline void JoltPhysicsReactor::RMat44ToMatrix4f(const JPH::RMat44& src, Matrix4
     JPH::Vec4 c0 = src.GetColumn4(0);
     JPH::Vec4 c1 = src.GetColumn4(1);
     JPH::Vec4 c2 = src.GetColumn4(2);
-    JPH::DVec3 c3 = src.GetTranslation();
+    JPH::Vec3 c3 = src.GetTranslation();
     
     dst.r.v[0].v[0] = c0.GetX(); dst.r.v[0].v[1] = c0.GetY(); dst.r.v[0].v[2] = c0.GetZ(); dst.r.v[0].v[3] = c0.GetW();
     dst.r.v[1].v[0] = c1.GetX(); dst.r.v[1].v[1] = c1.GetY(); dst.r.v[1].v[2] = c1.GetZ(); dst.r.v[1].v[3] = c1.GetW();
