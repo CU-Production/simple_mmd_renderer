@@ -136,7 +136,7 @@ target_include_directories(simple_mmd_renderer PRIVATE
     ${CMAKE_SOURCE_DIR}/3rd_party/bullet/src
 )
 target_link_libraries(simple_mmd_renderer PRIVATE hmm imgui imguizmo mmd sokol stb nfd
-    BulletDynamics BulletCollision LinearMath
+    BulletDynamics BulletCollision LinearMath Jolt::Jolt
 )
 add_custom_command(
     TARGET simple_mmd_renderer POST_BUILD
